@@ -33,6 +33,9 @@ def _to_python(obj):
 
 
 def result_to_dict(result: AnalysisResult) -> dict:
+    from .analyzer import enrich_cluster_metrics
+
+    enrich_cluster_metrics(result)
     risk = result.risk_overview
     data = {
         "product_name": result.product_name,
@@ -55,6 +58,10 @@ def result_to_dict(result: AnalysisResult) -> dict:
                 "size": int(c.size),
                 "keywords": list(c.keywords),
                 "representative_reviews": [_to_python(r) for r in c.representative_reviews],
+                "ratio": float(c.ratio),
+                "last_appeared_date": c.last_appeared_date,
+                "linked_anomaly_dates": list(c.linked_anomaly_dates),
+                "priority": c.priority,
             }
             for c in result.clusters
         ],
@@ -71,6 +78,14 @@ def export_json(result: AnalysisResult, output_path: str) -> None:
     data = result_to_dict(result)
     with open(output_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+
+
+def export_ticket_csv(result: AnalysisResult, output_path: str) -> None:
+    """导出差评主题工单 CSV"""
+    from .analyzer import build_ticket_dataframe
+
+    df_ticket = build_ticket_dataframe(result)
+    df_ticket.to_csv(output_path, index=False, encoding="utf-8-sig")
 
 
 def export_compare_json(compare_data: dict, output_path: str) -> None:
@@ -176,30 +191,52 @@ class RichReporter:
         self.console.print(table)
 
     def print_top_clusters(self, result: AnalysisResult, top_n: int = 5) -> None:
+        from .analyzer import enrich_cluster_metrics
+
+        enrich_cluster_metrics(result)
         if not result.clusters:
             self.console.print("[yellow]暂无差评聚类结果[/yellow]")
             return
 
+        priority_color = {"高优先级": "red", "中优先级": "yellow", "低优先级": "green"}
+
         table = Table(
-            title=f"🔥 Top {min(top_n, len(result.clusters))} 差评主题",
+            title=f"🔥 Top {min(top_n, len(result.clusters))} 差评主题（可分派工单）",
             show_header=True,
             header_style="bold magenta",
         )
-        table.add_column("排名", style="dim", width=6, justify="center")
-        table.add_column("评论数", style="cyan", width=8, justify="center")
+        table.add_column("工单", style="dim", width=6, justify="center")
+        table.add_column("评论数", style="cyan", width=7, justify="center")
+        table.add_column("占比", style="cyan", width=7, justify="center")
+        table.add_column("优先级", width=8, justify="center")
+        table.add_column("最近出现", style="blue", width=12, justify="center")
+        table.add_column("突增", style="red", width=6, justify="center")
         table.add_column("主题关键词", style="white")
 
         for i, cluster in enumerate(result.clusters[:top_n]):
+            pct = f"{cluster.ratio * 100:.1f}%"
+            pr = cluster.priority or "低优先级"
+            pr_style = priority_color.get(pr, "white")
+            anomaly_link = "是" if cluster.linked_anomaly_dates else "否"
+            last_date = cluster.last_appeared_date or "-"
             keywords_str = "、".join(cluster.keywords[:6])
-            table.add_row(str(i + 1), str(cluster.size), keywords_str)
+            ticket_id = f"T{i + 1:03d}"
+            table.add_row(
+                ticket_id, str(cluster.size), pct,
+                f"[{pr_style}]{pr}[/{pr_style}]",
+                last_date, anomaly_link, keywords_str,
+            )
 
         self.console.print(table)
 
         self.console.print("\n[bold underline]📝 代表性评论:[/bold underline]\n")
         for i, cluster in enumerate(result.clusters[:top_n]):
             theme = "、".join(cluster.keywords[:5])
+            pr = cluster.priority or "低优先级"
+            pr_style = priority_color.get(pr, "white")
             self.console.print(
                 f"[bold red]主题 #{i + 1}[/bold red] [dim]({cluster.size}条)[/dim] "
+                f"[{pr_style}][{pr}][/{pr_style}] "
                 f"[cyan]→ {theme}[/cyan]"
             )
             for j, review in enumerate(cluster.representative_reviews[:2]):

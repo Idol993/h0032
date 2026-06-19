@@ -318,9 +318,33 @@ const negData = timeData.map(function(t) { return {
     value: t.negative_count,
     itemStyle: t.is_anomaly ? { color: '#f56c6c', borderColor: '#c0392b', borderWidth: 2 } : { color: '#ff6b6b' }
 };});
+const neuData = timeData.map(function(t) { return t.neutral_count; });
+const revData = timeData.map(function(t) { return t.review_needed_count; });
+const totalData = timeData.map(function(t) { return t.total_count; });
+
 timeChart.setOption({
-    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
-    legend: { data: ['正面评论', '负面评论'] },
+    tooltip: {
+        trigger: 'axis',
+        axisPointer: { type: 'cross' },
+        formatter: function(params) {
+            if (!params || params.length === 0) return '';
+            const date = params[0].axisValue;
+            const point = timeData.find(function(t) { return t.date === date; });
+            const lines = ['<b>' + date + '</b>'];
+            params.forEach(function(p) {
+                lines.push(p.marker + p.seriesName + ': ' + p.value + ' 条');
+            });
+            if (point) {
+                lines.push('<hr style="margin:4px 0; border-top:1px dashed #ccc"/>');
+                lines.push('<b>📊 当天总评数: ' + point.total_count + ' 条</b>');
+                if (point.is_anomaly) {
+                    lines.push('<span style="color:#f56c6c"><b>⚠️ 差评突增预警 (环比 ' + (point.negative_growth * 100).toFixed(0) + '%)</b></span>');
+                }
+            }
+            return lines.join('<br/>');
+        }
+    },
+    legend: { data: ['正面评论', '负面评论', '中性评论', '待人工确认', '当天总评'] },
     grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
     xAxis: { type: 'category', boundaryGap: false, data: dates },
     yAxis: { type: 'value', name: '评论数' },
@@ -330,8 +354,8 @@ timeChart.setOption({
             data: posData,
             itemStyle: { color: '#67c23a' },
             areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-                { offset: 0, color: 'rgba(103,194,58,0.4)' },
-                { offset: 1, color: 'rgba(103,194,58,0.05)' }
+                { offset: 0, color: 'rgba(103,194,58,0.25)' },
+                { offset: 1, color: 'rgba(103,194,58,0.03)' }
             ])}
         },
         {
@@ -346,9 +370,27 @@ timeChart.setOption({
                 label: { color: '#fff', fontWeight: 'bold' }
             },
             areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
-                { offset: 0, color: 'rgba(245,108,108,0.4)' },
-                { offset: 1, color: 'rgba(245,108,108,0.05)' }
+                { offset: 0, color: 'rgba(245,108,108,0.25)' },
+                { offset: 1, color: 'rgba(245,108,108,0.03)' }
             ])}
+        },
+        {
+            name: '中性评论', type: 'line', smooth: true,
+            data: neuData,
+            itemStyle: { color: '#909399' },
+            lineStyle: { type: 'dashed' }
+        },
+        {
+            name: '待人工确认', type: 'line', smooth: true,
+            data: revData,
+            itemStyle: { color: '#e6a23c' },
+            lineStyle: { type: 'dotted', width: 2 }
+        },
+        {
+            name: '当天总评', type: 'line', smooth: false,
+            data: totalData,
+            itemStyle: { color: '#409eff' },
+            lineStyle: { type: 'solid', width: 2 }
         }
     ]
 });

@@ -11,11 +11,12 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn
 
 from . import __version__
-from .analyzer import ReviewAnalyzer, compare_products
+from .analyzer import ReviewAnalyzer, compare_products, filter_clusters
 from .reporter import (
     HtmlReporter,
     export_compare_json,
     export_json,
+    export_ticket_csv,
     print_compare_to_console,
     print_to_console,
 )
@@ -67,7 +68,11 @@ def app():
 @click.option("--product-name", "-n", type=str, help="商品名称（默认使用文件名）")
 @click.option("--model", type=str, default="uer/roberta-base-finetuned-jd-binary", help="HuggingFace情感模型")
 @click.option("--no-console", is_flag=True, help="不打印终端报告")
-def analyze(csv_file: str, output: str | None, fmt: str | None, product_name: str | None, model: str, no_console: bool):
+@click.option("--ticket-csv", type=click.Path(), help="差评主题工单导出路径 (.csv)")
+@click.option("--high-risk-only", is_flag=True, help="仅导出高优先级差评主题（报告/JSON/工单均生效）")
+@click.option("--anomaly-only", is_flag=True, help="仅导出关联了差评突增的主题")
+def analyze(csv_file: str, output: str | None, fmt: str | None, product_name: str | None, model: str, no_console: bool,
+            ticket_csv: str | None, high_risk_only: bool, anomaly_only: bool):
     """分析单个商品的评论数据，输出情感分布、差评聚类、时间趋势报告。
 
     CSV_FILE: 评论数据CSV文件路径，需包含评论文本列（text/content/评论等）
@@ -93,10 +98,19 @@ def analyze(csv_file: str, output: str | None, fmt: str | None, product_name: st
             result = analyzer.analyze(df, product_name=product)
             progress.update(task, advance=60, description="情感分类与差评聚类完成")
 
+            # 应用风险筛选（三端口径一致）
+            if high_risk_only or anomaly_only:
+                result = filter_clusters(result, high_priority_only=high_risk_only, with_anomaly_only=anomaly_only)
+
             out_fmt = fmt or _check_output_format(output)
+            ticket_saved = False
+            if ticket_csv:
+                progress.update(task, advance=5, description="生成差评主题工单 CSV...")
+                export_ticket_csv(result, ticket_csv)
+                ticket_saved = True
 
             if output:
-                progress.update(task, advance=10, description=f"生成 {out_fmt or '文件'} 报告...")
+                progress.update(task, advance=5, description=f"生成 {out_fmt or '文件'} 报告...")
                 if out_fmt == "json":
                     export_json(result, output)
                 elif out_fmt == "csv":
@@ -107,7 +121,7 @@ def analyze(csv_file: str, output: str | None, fmt: str | None, product_name: st
                     reporter.render(result, output)
                 progress.update(task, advance=5)
             else:
-                progress.update(task, advance=15)
+                progress.update(task, advance=10)
 
             progress.update(task, completed=100, description="✅ 分析完成")
 
@@ -118,6 +132,9 @@ def analyze(csv_file: str, output: str | None, fmt: str | None, product_name: st
         if output:
             abs_out = os.path.abspath(output)
             console.print(f"\n[bold green]💾 报告已保存至:[/bold green] {abs_out}")
+        if ticket_saved:
+            abs_ticket = os.path.abspath(ticket_csv)
+            console.print(f"[bold cyan]📋 差评主题工单已保存至:[/bold cyan] {abs_ticket}")
 
     except click.ClickException:
         raise

@@ -25,8 +25,11 @@ from reviewscan.analyzer import (
     AnalysisResult,
     ReviewAnalyzer,
     SentimentResult,
+    build_ticket_dataframe,
+    enrich_cluster_metrics,
+    filter_clusters,
 )
-from reviewscan.reporter import HtmlReporter, export_json, result_to_dict
+from reviewscan.reporter import HtmlReporter, export_json, export_ticket_csv, result_to_dict
 
 
 class StubSentiment:
@@ -385,12 +388,263 @@ def check_5_cluster_representative_match() -> tuple[bool, str]:
     return ok, msg
 
 
+def check_6_ticket_csv_vs_report() -> tuple[bool, str]:
+    """工单CSV真实生成，与 JSON/对象中的差评主题互相对应"""
+    from io import StringIO
+
+    analyzer = ReviewAnalyzer()
+    _inject_stub(analyzer)
+
+    df = pd.read_csv(StringIO(SAMPLE_WITH_AMBIGUOUS))
+    result = analyzer.analyze(df, product_name="自检-工单对照")
+    enrich_cluster_metrics(result)
+
+    with tempfile.TemporaryDirectory() as td:
+        ticket_path = os.path.join(td, "tickets.csv")
+        json_path = os.path.join(td, "out.json")
+
+        export_ticket_csv(result, ticket_path)
+        export_json(result, json_path)
+
+        # 读取工单CSV
+        df_ticket = pd.read_csv(ticket_path, encoding="utf-8-sig")
+        with open(json_path, "r", encoding="utf-8") as f:
+            jdata = json.load(f)
+
+        msgs = []
+        ok = True
+
+        # 1. 工单行数 = 差评簇数量
+        if len(df_ticket) != len(result.clusters):
+            ok = False
+            msgs.append(f"工单CSV行数={len(df_ticket)} != 差评簇数量={len(result.clusters)}")
+
+        # 2. 主题数量一致
+        if len(df_ticket) != len(jdata["clusters"]):
+            ok = False
+            msgs.append(f"工单行数={len(df_ticket)} != JSON簇数={len(jdata['clusters'])}")
+
+        # 3. 按工单编号顺序逐行核对评论数、关键词、代表评论
+        for idx in range(min(len(df_ticket), len(result.clusters))):
+            ticket_row = df_ticket.iloc[idx]
+            cluster = result.clusters[idx]
+
+            # 工单评论数
+            if int(ticket_row["评论数"]) != cluster.size:
+                ok = False
+                msgs.append(f"第{idx+1}行工单评论数={ticket_row['评论数']} != 簇大小={cluster.size}")
+
+            # 工单关键词
+            ticket_keywords = set(str(ticket_row["主题关键词"]).replace("、", ",").split(","))
+            cluster_keywords = set(cluster.keywords)
+            if not ticket_keywords.issubset(cluster_keywords) and not cluster_keywords.issubset(ticket_keywords):
+                overlap = ticket_keywords & cluster_keywords
+                if len(overlap) < max(len(ticket_keywords), len(cluster_keywords)) * 0.5:
+                    ok = False
+                    msgs.append(f"第{idx+1}行工单关键词与簇关键词对应不足: 工单{ticket_keywords} vs 簇{cluster_keywords}")
+
+            # 工单代表评论中包含簇的至少1条代表评论
+            ticket_rep = str(ticket_row["代表评论"])
+            cluster_rep_texts = [r.get("text", "") for r in cluster.representative_reviews]
+            if cluster_rep_texts and not any(txt[:50] in ticket_rep for txt in cluster_rep_texts if txt):
+                ok = False
+                msgs.append(f"第{idx+1}行工单代表评论未包含簇的代表评论")
+
+            # 工单占比是否一致（允许±0.1%误差）
+            pct_str = str(ticket_row["占差评比例"]).replace("%", "")
+            if pct_str and result.negative_count:
+                try:
+                    ticket_pct = float(pct_str)
+                    real_pct = cluster.ratio * 100
+                    if abs(ticket_pct - real_pct) > 1.0:
+                        ok = False
+                        msgs.append(f"第{idx+1}行工单占比={ticket_pct}% 与实际占比={real_pct:.1f}% 误差超过1%")
+                except ValueError:
+                    pass
+
+            # JSON中的簇字段与工单核对
+            if idx < len(jdata["clusters"]):
+                jc = jdata["clusters"][idx]
+                if int(jc["size"]) != int(ticket_row["评论数"]):
+                    ok = False
+                    msgs.append(f"第{idx+1}行 JSON size={jc['size']} != 工单评论数={ticket_row['评论数']}")
+                if jc.get("priority") not in str(ticket_row.get("建议优先级", "")):
+                    ok = False
+                    msgs.append(f"第{idx+1}行 JSON priority={jc.get('priority')} 与 工单优先级={ticket_row.get('建议优先级')} 不一致")
+
+        # 4. 工单包含指定列
+        required_cols = ["主题编号", "评论数", "占差评比例", "主题关键词", "代表评论", "最近出现日期", "是否关联差评突增", "建议优先级"]
+        missing_cols = [c for c in required_cols if c not in df_ticket.columns]
+        if missing_cols:
+            ok = False
+            msgs.append(f"工单CSV缺少列: {missing_cols}")
+
+        detail = f"工单{len(df_ticket)}行，JSON簇{len(jdata['clusters'])}个，对象簇{len(result.clusters)}个"
+        msg = f"{detail} {'✅工单/JSON/对象三方一致' if ok else '❌不一致: ' + '; '.join(msgs)}"
+        return ok, msg
+
+
+def check_7_html_trend_four_types() -> tuple[bool, str]:
+    """HTML时间趋势图包含四类+总评，每天总数与JSON time_trend对齐"""
+    from io import StringIO
+
+    analyzer = ReviewAnalyzer()
+    _inject_stub(analyzer)
+
+    df = pd.read_csv(StringIO(SAMPLE_WITH_AMBIGUOUS))
+    result = analyzer.analyze(df, product_name="自检-HTML趋势四类")
+
+    with tempfile.TemporaryDirectory() as td:
+        html_path = os.path.join(td, "out.html")
+        json_path = os.path.join(td, "out.json")
+        HtmlReporter().render(result, html_path)
+        export_json(result, json_path)
+
+        with open(html_path, "r", encoding="utf-8") as f:
+            html_text = f.read()
+        with open(json_path, "r", encoding="utf-8") as f:
+            jdata = json.load(f)
+
+        msgs = []
+        ok = True
+
+        # 1. 图例包含四类+当天总评
+        legend_need = ["正面评论", "负面评论", "中性评论", "待人工确认", "当天总评"]
+        for name in legend_need:
+            if name not in html_text:
+                ok = False
+                msgs.append(f"HTML图例缺少 {name}")
+
+        # 2. HTML time_trend 变量里的每天四类之和 = total_count（与JSON一致）
+        def _extract_json_var(html, varname):
+            m = re.search(rf"const\s+{varname}\s*=\s*(.+?);", html, re.DOTALL)
+            if not m:
+                raise ValueError(f"HTML 中找不到变量 {varname}")
+            return json.loads(m.group(1))
+
+        html_time = _extract_json_var(html_text, "timeData")
+        json_time = jdata["time_trend"]
+
+        if len(html_time) != len(json_time):
+            ok = False
+            msgs.append(f"HTML time_trend天数={len(html_time)} != JSON天数={len(json_time)}")
+
+        for ht, jt in zip(html_time, json_time):
+            four_sum = (
+                int(ht.get("positive_count", 0))
+                + int(ht.get("negative_count", 0))
+                + int(ht.get("neutral_count", 0))
+                + int(ht.get("review_needed_count", 0))
+            )
+            if four_sum != int(ht.get("total_count", -1)):
+                ok = False
+                msgs.append(f"{ht.get('date')}: HTML四类相加={four_sum} != HTML total_count={ht.get('total_count')}")
+            if int(ht.get("total_count", -1)) != int(jt.get("total_count", -2)):
+                ok = False
+                msgs.append(f"{ht.get('date')}: HTML total={ht.get('total_count')} != JSON total={jt.get('total_count')}")
+            # 待确认数量一致性
+            if int(ht.get("review_needed_count", -1)) != int(jt.get("review_needed_count", -2)):
+                ok = False
+                msgs.append(f"{ht.get('date')}: HTML待确认={ht.get('review_needed_count')} != JSON待确认={jt.get('review_needed_count')}")
+
+        # 3. 自定义tooltip函数存在（含当天总评数展示）
+        if "📊 当天总评数" not in html_text:
+            ok = False
+            msgs.append("HTML趋势图tooltip不含'当天总评数'字段")
+
+        detail = f"共{len(html_time)}天趋势数据"
+        msg = f"{detail} {'✅HTML四类+总评与JSON一致' if ok else '❌错误: ' + '; '.join(msgs)}"
+        return ok, msg
+
+
+def check_8_risk_filter_consistency() -> tuple[bool, str]:
+    """风险筛选三端口径一致：筛选后簇数量在对象/JSON/工单CSV中相同"""
+    from io import StringIO
+
+    analyzer = ReviewAnalyzer()
+    _inject_stub(analyzer)
+
+    df = pd.read_csv(StringIO(SAMPLE_WITH_AMBIGUOUS))
+    result_full = analyzer.analyze(df, product_name="自检-风险筛选全量")
+    enrich_cluster_metrics(result_full)
+
+    # 以高优先级筛选为例
+    result_filtered = filter_clusters(result_full, high_priority_only=True, with_anomaly_only=False)
+
+    with tempfile.TemporaryDirectory() as td:
+        ticket_full = os.path.join(td, "tickets_full.csv")
+        ticket_flt = os.path.join(td, "tickets_filtered.csv")
+        json_flt = os.path.join(td, "out_filtered.json")
+        html_flt = os.path.join(td, "out_filtered.html")
+
+        export_ticket_csv(result_full, ticket_full)
+        export_ticket_csv(result_filtered, ticket_flt)
+        export_json(result_filtered, json_flt)
+        HtmlReporter().render(result_filtered, html_flt)
+
+        df_t_full = pd.read_csv(ticket_full, encoding="utf-8-sig")
+        df_t_flt = pd.read_csv(ticket_flt, encoding="utf-8-sig")
+
+        with open(json_flt, "r", encoding="utf-8") as f:
+            jflt = json.load(f)
+        with open(html_flt, "r", encoding="utf-8") as f:
+            html_text = f.read()
+
+        msgs = []
+        ok = True
+
+        # 1. 筛选后的簇数量在三方一致
+        n_obj = len(result_filtered.clusters)
+        n_tkt = len(df_t_flt)
+        n_json = len(jflt["clusters"])
+
+        if not (n_obj == n_tkt == n_json):
+            ok = False
+            msgs.append(f"筛选后簇数量不一致: 对象={n_obj} 工单={n_tkt} JSON={n_json}")
+
+        # 2. 筛选出的确实都是高优先级
+        if len(df_t_flt) > 0:
+            non_high = df_t_flt[df_t_flt["建议优先级"] != "高优先级"]
+            if len(non_high) > 0:
+                ok = False
+                msgs.append(f"高优先级筛选后仍存在非高优先级行: {list(non_high['建议优先级'])}")
+
+        # 3. HTML中嵌入的clusters数量也一致
+        m = re.search(r"const\s+clusters\s*=\s*(.+?);", html_text, re.DOTALL)
+        if m:
+            html_clusters = json.loads(m.group(1))
+            if len(html_clusters) != n_json:
+                ok = False
+                msgs.append(f"HTML簇数量={len(html_clusters)} != JSON簇数量={n_json}")
+
+        # 4. 全量工单优先级字段非空
+        if "建议优先级" not in df_t_full.columns or df_t_full["建议优先级"].isna().any():
+            ok = False
+            msgs.append("全量工单中优先级字段为空或缺失")
+
+        # 5. 全局指标不受筛选影响（总评论数/情感分布保持不变）
+        if result_full.total_reviews != result_filtered.total_reviews:
+            ok = False
+            msgs.append(f"筛选后总评论数变了: 全量={result_full.total_reviews} 筛选={result_filtered.total_reviews}")
+        if jflt["total_reviews"] != result_full.total_reviews:
+            ok = False
+            msgs.append(f"JSON中总评论数不一致: {jflt['total_reviews']} vs {result_full.total_reviews}")
+
+        detail = (f"全量工单{len(df_t_full)}行，筛选后{n_obj}行（对象）/{n_tkt}行（工单）/{n_json}行（JSON）"
+                  f"| 筛选条件=高优先级-only")
+        msg = f"{detail} {'✅三端口径一致且筛选有效' if ok else '❌错误: ' + '; '.join(msgs)}"
+        return ok, msg
+
+
 CHECKS = [
     ("1.情感分布统计(四类相加=总数)", check_1_sentiment_distribution),
     ("2.Watch增量合并(历史+新增全量)", check_2_watch_merge),
     ("3.JSON与HTML口径一致性", check_3_json_html_consistency),
     ("4.时间趋势总数(含待确认)", check_4_time_trend_with_review_needed),
     ("5.差评主题与代表评论对应", check_5_cluster_representative_match),
+    ("6.工单CSV与JSON/报告三方对照", check_6_ticket_csv_vs_report),
+    ("7.HTML趋势图四类+总评对齐JSON", check_7_html_trend_four_types),
+    ("8.风险筛选三端(对象/JSON/工单)口径一致", check_8_risk_filter_consistency),
 ]
 
 

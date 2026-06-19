@@ -39,6 +39,10 @@ class ClusterInfo:
     size: int
     keywords: list[str]
     representative_reviews: list[dict]
+    ratio: float = 0.0
+    last_appeared_date: str = ""
+    linked_anomaly_dates: list[str] = field(default_factory=list)
+    priority: str = "低优先级"
 
 
 @dataclass
@@ -608,6 +612,119 @@ class ReviewAnalyzer:
             merged = work_new.reset_index(drop=True)
 
         return self._build_result_from_labeled_df(merged, col_map, product_name)
+
+
+def enrich_cluster_metrics(result: AnalysisResult) -> AnalysisResult:
+    """补全每个差评簇的工单字段：占比、最近出现日期、突增关联日期、建议优先级"""
+    if not result.clusters or not result.negative_count:
+        return result
+
+    anomalies = result.anomaly_points or []
+
+    # 建一个 dict: cluster_id -> 关联的异常日期列表
+    anomaly_map: dict[int, list[str]] = {}
+    for a in anomalies:
+        for cid in a.linked_clusters:
+            anomaly_map.setdefault(cid, []).append(a.date)
+
+    # 建一个 dict: cluster_id -> 簇里所有评论的日期 (取原始 df 中该簇的评论)
+    # 这里我们通过代表评论的 date 估算最近日期（如果有完整 df 就更好，但目前代表评论里带了 date）
+    for cluster in result.clusters:
+        # 占比
+        cluster.ratio = round(cluster.size / result.negative_count, 4)
+
+        # 最近出现日期：从代表评论的 date 里取最大的
+        dates = []
+        for rev in cluster.representative_reviews:
+            d = rev.get("date", "")
+            if d and str(d) != "nan":
+                dates.append(str(d))
+        if dates:
+            cluster.last_appeared_date = max(dates)
+
+        # 突增关联
+        cluster.linked_anomaly_dates = list(anomaly_map.get(cluster.cluster_id, []))
+
+        # 优先级打分
+        score = 0.0
+        score += cluster.ratio * 100  # 占比权重高
+        if cluster.linked_anomaly_dates:
+            score += 40  # 关联突增
+        if len(cluster.keywords) >= 3:
+            score += 10  # 主题明确
+
+        if score >= 60:
+            cluster.priority = "高优先级"
+        elif score >= 30:
+            cluster.priority = "中优先级"
+        else:
+            cluster.priority = "低优先级"
+
+    return result
+
+
+def build_ticket_dataframe(result: AnalysisResult) -> pd.DataFrame:
+    """生成差评主题工单 DataFrame"""
+    enrich_cluster_metrics(result)
+
+    rows = []
+    for c in result.clusters:
+        rep_texts = " | ".join(
+            r.get("text", "").replace("\n", " ").replace("\r", " ")[:200]
+            for r in c.representative_reviews
+        )
+        rows.append({
+            "主题编号": f"T{c.cluster_id + 1:03d}",
+            "评论数": c.size,
+            "占差评比例": f"{c.ratio * 100:.1f}%",
+            "占比数值": c.ratio,
+            "主题关键词": "、".join(c.keywords),
+            "代表评论": rep_texts,
+            "最近出现日期": c.last_appeared_date,
+            "关联差评突增日期": "、".join(c.linked_anomaly_dates),
+            "是否关联差评突增": "是" if c.linked_anomaly_dates else "否",
+            "建议优先级": c.priority,
+        })
+
+    return pd.DataFrame(rows)
+
+
+def filter_clusters(
+    result: AnalysisResult,
+    high_priority_only: bool = False,
+    with_anomaly_only: bool = False,
+) -> AnalysisResult:
+    """按风险筛选簇。筛选不影响总评论数、情感分布等全局指标，只影响 clusters。"""
+    if not high_priority_only and not with_anomaly_only:
+        return result
+
+    enrich_cluster_metrics(result)
+    filtered = []
+    for c in result.clusters:
+        keep = True
+        if high_priority_only and c.priority != "高优先级":
+            keep = False
+        if with_anomaly_only and not c.linked_anomaly_dates:
+            keep = False
+        if keep:
+            filtered.append(c)
+
+    # 构造新的 AnalysisResult（保持其他字段不变）
+    return AnalysisResult(
+        product_name=result.product_name,
+        total_reviews=result.total_reviews,
+        positive_count=result.positive_count,
+        negative_count=result.negative_count,
+        neutral_count=result.neutral_count,
+        review_needed_count=result.review_needed_count,
+        sentiment_distribution=result.sentiment_distribution,
+        clusters=filtered,
+        time_trend=result.time_trend,
+        anomaly_points=result.anomaly_points,
+        positive_keywords=result.positive_keywords,
+        risk_overview=result.risk_overview,
+        raw_df=result.raw_df,
+    )
 
 
 def compare_products(results: list[AnalysisResult]) -> dict:
