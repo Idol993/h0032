@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ result.product_name }} - 评论分析报告</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/echarts-wordcloud@2.1.0/dist/echarts-wordcloud.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f7fa;
+    color: #303133;
+    line-height: 1.6;
+    padding: 24px;
+}
+.container { max-width: 1200px; margin: 0 auto; }
+.header {
+    background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    color: white;
+    padding: 32px;
+    border-radius: 12px;
+    margin-bottom: 24px;
+    box-shadow: 0 4px 20px rgba(102, 126, 234, 0.3);
+}
+.header h1 { font-size: 28px; margin-bottom: 12px; }
+.stats-row {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-top: 16px;
+}
+.stat-card {
+    background: rgba(255,255,255,0.2);
+    backdrop-filter: blur(10px);
+    padding: 14px 24px;
+    border-radius: 8px;
+    min-width: 120px;
+}
+.stat-card .num { font-size: 28px; font-weight: 700; }
+.stat-card .label { font-size: 13px; opacity: 0.9; }
+.card {
+    background: white;
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+}
+.card h2 {
+    font-size: 18px;
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid #ebeef5;
+    color: #303133;
+}
+.chart-container { width: 100%; height: 360px; }
+.chart-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+    margin-bottom: 20px;
+}
+@media (max-width: 768px) {
+    .chart-row { grid-template-columns: 1fr; }
+}
+.cluster-list { display: flex; flex-direction: column; gap: 16px; }
+.cluster-item {
+    border: 1px solid #ebeef5;
+    border-radius: 8px;
+    padding: 16px;
+    background: #fafbfc;
+    transition: all 0.2s;
+}
+.cluster-item:hover { box-shadow: 0 4px 12px rgba(0,0,0,0.08); border-color: #667eea; }
+.cluster-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 10px;
+}
+.cluster-id {
+    background: linear-gradient(135deg, #ff6b6b, #ee5a24);
+    color: white;
+    padding: 4px 12px;
+    border-radius: 20px;
+    font-weight: 600;
+    font-size: 13px;
+}
+.cluster-size { color: #909399; font-size: 13px; }
+.keywords { margin: 10px 0; }
+.kw-tag {
+    display: inline-block;
+    background: #ecf5ff;
+    color: #409eff;
+    padding: 4px 10px;
+    border-radius: 14px;
+    margin: 3px 4px 3px 0;
+    font-size: 13px;
+}
+.review-list { margin-top: 10px; }
+.review-item {
+    background: white;
+    border-left: 3px solid #409eff;
+    padding: 10px 14px;
+    margin-bottom: 8px;
+    font-size: 14px;
+    color: #606266;
+    border-radius: 0 4px 4px 0;
+}
+.anomaly-badge {
+    display: inline-block;
+    background: #fef0f0;
+    color: #f56c6c;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    margin-left: 8px;
+    font-weight: 600;
+}
+.footer {
+    text-align: center;
+    padding: 24px;
+    color: #909399;
+    font-size: 13px;
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<div class="header">
+    <h1>📊 {{ result.product_name }} - 评论分析报告</h1>
+    <p>自动分析评论情感，聚类差评主题，检测异常时间点</p>
+    <div class="stats-row">
+        <div class="stat-card">
+            <div class="num">{{ result.total_reviews }}</div>
+            <div class="label">总评论数</div>
+        </div>
+        <div class="stat-card">
+            <div class="num" style="color:#67c23a">{{ result.positive_count }}</div>
+            <div class="label">正面评论</div>
+        </div>
+        <div class="stat-card">
+            <div class="num" style="color:#f56c6c">{{ result.negative_count }}</div>
+            <div class="label">负面评论</div>
+        </div>
+        <div class="stat-card">
+            <div class="num" style="color:#e6a23c">{{ result.review_needed_count }}</div>
+            <div class="label">待人工确认</div>
+        </div>
+    </div>
+</div>
+
+<div class="chart-row">
+    <div class="card">
+        <h2>🥧 情感分布</h2>
+        <div id="sentimentPie" class="chart-container"></div>
+    </div>
+    <div class="card">
+        <h2>✨ 好评关键词词云</h2>
+        <div id="wordCloud" class="chart-container"></div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>🔥 差评主题聚类</h2>
+    <div class="chart-container" id="clusterBar"></div>
+</div>
+
+<div class="card">
+    <h2>🔥 差评主题详情</h2>
+    <div class="cluster-list">
+        {% for cluster in result.clusters %}
+        <div class="cluster-item">
+            <div class="cluster-header">
+                <span class="cluster-id">主题 #{{ cluster.cluster_id + 1 }}</span>
+                <span class="cluster-size">共 {{ cluster.size }} 条评论</span>
+            </div>
+            <div class="keywords">
+                {% for kw in cluster.keywords %}
+                <span class="kw-tag">{{ kw }}</span>
+                {% endfor %}
+            </div>
+            <div class="review-list">
+                {% for rev in cluster.representative_reviews %}
+                <div class="review-item">{{ rev.text }}</div>
+                {% endfor %}
+            </div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<div class="card">
+    <h2>📈 情感时间趋势{% if result.anomaly_points %} <span class="anomaly-badge">⚠️ {{ result.anomaly_points|length }} 个异常点</span>{% endif %}</h2>
+    <div class="chart-container" id="timeTrend"></div>
+</div>
+
+<div class="footer">
+    由 ReviewScan 自动生成 | 商品评论情感分析与差评聚类工具
+</div>
+
+</div>
+
+<script>
+const sentimentData = {{ result.sentiment_distribution | tojson }};
+const pieChart = echarts.init(document.getElementById('sentimentPie'));
+pieChart.setOption({
+    tooltip: { trigger: 'item', formatter: '{b}: {c} ({d}%)' },
+    legend: { bottom: '0%', left: 'center' },
+    series: [{
+        type: 'pie',
+        radius: ['40%', '70%'],
+        avoidLabelOverlap: false,
+        label: { show: true, formatter: '{b}\n{d}%' },
+        data: [
+            { value: sentimentData['正面'] || 0, name: '正面', itemStyle: { color: '#67c23a' } },
+            { value: sentimentData['负面'] || 0, name: '负面', itemStyle: { color: '#f56c6c' } },
+            { value: sentimentData['中性'] || 0, name: '中性', itemStyle: { color: '#909399' } },
+            { value: sentimentData['待人工确认'] || 0, name: '待人工确认', itemStyle: { color: '#e6a23c' } }
+        ]
+    }]
+});
+
+const kwData = {{ keywords_json | safe }};
+const wcData = kwData.map(function(d) { return { name: d.word, value: d.count }; });
+const wcChart = echarts.init(document.getElementById('wordCloud'));
+wcChart.setOption({
+    tooltip: { show: true },
+    series: [{
+        type: 'wordCloud',
+        shape: 'circle',
+        gridSize: 8,
+        sizeRange: [12, 50],
+        rotationRange: [-45, 45],
+        textStyle: {
+            color: function() {
+                const colors = ['#667eea', '#764ba2', '#409eff', '#67c23a', '#e6a23c', '#f56c6c'];
+                return colors[Math.floor(Math.random() * colors.length)];
+            }
+        },
+        data: wcData
+    }]
+});
+
+const clusters = {{ clusters_json | safe }};
+const clusterChart = echarts.init(document.getElementById('clusterBar'));
+clusterChart.setOption({
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
+    xAxis: { type: 'category', data: clusters.map(function(c) { return '主题#' + (c.cluster_id + 1); }), axisLabel: { rotate: 0 } },
+    yAxis: { type: 'value', name: '评论数' },
+    series: [{
+        type: 'bar',
+        data: clusters.map(function(c) { return c.size; }),
+        itemStyle: {
+            color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                { offset: 0, color: '#ff6b6b' },
+                { offset: 1, color: '#ee5a24' }
+            ]),
+            borderRadius: [4, 4, 0, 0]
+        },
+        label: { show: true, position: 'top', formatter: '{c}' }
+    }]
+});
+
+const timeData = {{ time_trend_json | safe }};
+const anomalyMap = {};
+{{ anomalies_json | safe }}.forEach(function(a) { anomalyMap[a.date] = a.linked_clusters; });
+const timeChart = echarts.init(document.getElementById('timeTrend'));
+const dates = timeData.map(function(t) { return t.date; });
+const posData = timeData.map(function(t) { return t.positive_count; });
+const negData = timeData.map(function(t) { return {
+    value: t.negative_count,
+    itemStyle: t.is_anomaly ? { color: '#f56c6c', borderColor: '#c0392b', borderWidth: 2 } : { color: '#ff6b6b' }
+};});
+timeChart.setOption({
+    tooltip: { trigger: 'axis', axisPointer: { type: 'cross' } },
+    legend: { data: ['正面评论', '负面评论'] },
+    grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
+    xAxis: { type: 'category', boundaryGap: false, data: dates },
+    yAxis: { type: 'value', name: '评论数' },
+    series: [
+        {
+            name: '正面评论', type: 'line', smooth: true,
+            data: posData,
+            itemStyle: { color: '#67c23a' },
+            areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                { offset: 0, color: 'rgba(103,194,58,0.4)' },
+                { offset: 1, color: 'rgba(103,194,58,0.05)' }
+            ])}
+        },
+        {
+            name: '负面评论', type: 'line', smooth: true,
+            data: negData,
+            itemStyle: { color: '#f56c6c' },
+            markPoint: {
+                symbol: 'pin', symbolSize: 50,
+                data: timeData.filter(function(t) { return t.is_anomaly; }).map(function(t) {
+                    return { name: '差评突增', coord: [t.date, t.negative_count], value: '⚠️ ' + t.negative_count };
+                }),
+                label: { color: '#fff', fontWeight: 'bold' }
+            },
+            areaStyle: { color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                { offset: 0, color: 'rgba(245,108,108,0.4)' },
+                { offset: 1, color: 'rgba(245,108,108,0.05)' }
+            ])}
+        }
+    ]
+});
+
+window.addEventListener('resize', function() {
+    pieChart.resize(); wcChart.resize(); clusterChart.resize(); timeChart.resize();
+});
+</script>
+</body>
+</html>

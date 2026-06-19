@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reviewscan"
+version = "0.1.0"
+description = "商品评论情感分析与差评聚类命令行工具"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "ReviewScan Team" }]
+license = { text = "MIT" }
+dependencies = [
+    "transformers>=4.35.0",
+    "scikit-learn>=1.3.0",
+    "pandas>=2.1.0",
+    "rich>=13.7.0",
+    "click>=8.1.0",
+    "jieba>=0.42.1",
+    "torch>=2.1.0",
+    "jinja2>=3.1.0",
+    "numpy>=1.24.0",
+]
+
+[project.scripts]
+reviewscan = "reviewscan.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["reviewscan*"]
+
+[tool.setuptools.package-data]
+reviewscan = ["templates/*.html"]

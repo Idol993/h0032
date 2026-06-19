@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>多产品差评对比分析报告</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #f5f7fa;
+    color: #303133;
+    line-height: 1.6;
+    padding: 24px;
+}
+.container { max-width: 1200px; margin: 0 auto; }
+.header {
+    background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+    color: white;
+    padding: 32px;
+    border-radius: 12px;
+    margin-bottom: 24px;
+    box-shadow: 0 4px 20px rgba(245, 87, 108, 0.3);
+}
+.header h1 { font-size: 28px; margin-bottom: 12px; }
+.card {
+    background: white;
+    border-radius: 12px;
+    padding: 24px;
+    margin-bottom: 20px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+}
+.card h2 {
+    font-size: 18px;
+    margin-bottom: 16px;
+    padding-bottom: 12px;
+    border-bottom: 2px solid #ebeef5;
+    color: #303133;
+}
+.chart-container { width: 100%; height: 380px; }
+.kw-tag {
+    display: inline-block;
+    padding: 4px 10px;
+    border-radius: 14px;
+    margin: 3px 4px 3px 0;
+    font-size: 13px;
+}
+.kw-common {
+    background: linear-gradient(135deg, #667eea, #764ba2);
+    color: white;
+}
+.kw-unique {
+    background: #fef0f0;
+    color: #f56c6c;
+    border: 1px solid #f56c6c;
+}
+.product-section { margin-bottom: 24px; }
+.product-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    background: #fafbfc;
+    border-radius: 8px;
+    margin-bottom: 12px;
+    border-left: 4px solid #409eff;
+}
+.product-header h3 { font-size: 16px; }
+.product-stats { color: #909399; font-size: 13px; }
+.cluster-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+}
+.cluster-card {
+    border: 1px solid #ebeef5;
+    border-radius: 8px;
+    padding: 14px;
+    background: #fafbfc;
+}
+.cluster-title {
+    font-weight: 600;
+    margin-bottom: 8px;
+    color: #f56c6c;
+}
+.cluster-size {
+    font-size: 12px;
+    color: #909399;
+    margin-left: 8px;
+    font-weight: normal;
+}
+.diff-section {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 16px;
+}
+.diff-box {
+    border: 2px solid #ebeef5;
+    border-radius: 8px;
+    padding: 16px;
+}
+.diff-box h4 {
+    font-size: 15px;
+    margin-bottom: 10px;
+    color: #667eea;
+}
+.diff-box.empty {
+    text-align: center;
+    color: #909399;
+    padding: 32px 16px;
+}
+.badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 12px;
+    margin-left: 6px;
+}
+.badge-neg { background: #fef0f0; color: #f56c6c; }
+.footer {
+    text-align: center;
+    padding: 24px;
+    color: #909399;
+    font-size: 13px;
+}
+</style>
+</head>
+<body>
+<div class="container">
+
+<div class="header">
+    <h1>🔍 多产品差评对比分析报告</h1>
+    <p>找出各产品共有问题和独有问题，辅助定位差异化问题</p>
+</div>
+
+<div class="card">
+    <h2>📊 各产品差评数量对比</h2>
+    <div id="compareBar" class="chart-container"></div>
+</div>
+
+<div class="card">
+    <h2>🔗 共有问题关键词 <span class="badge badge-neg">{{ compare_data.intersection | length }} 个</span></h2>
+    <div>
+        {% if compare_data.intersection %}
+            {% for kw in compare_data.intersection %}
+            <span class="kw-tag kw-common">{{ kw }}</span>
+            {% endfor %}
+        {% else %}
+            <p style="color:#909399">暂无共有问题关键词</p>
+        {% endif %}
+    </div>
+</div>
+
+<div class="card">
+    <h2>🌟 各产品独有问题</h2>
+    <div class="diff-section">
+        {% for product, keywords in compare_data.differences.items() %}
+        <div class="diff-box {% if not keywords %}empty{% endif %}">
+            <h4>{{ product }}</h4>
+            {% if keywords %}
+                {% for kw in keywords %}
+                <span class="kw-tag kw-unique">{{ kw }}</span>
+                {% endfor %}
+            {% else %}
+                <p>无明显独有问题</p>
+            {% endif %}
+        </div>
+        {% endfor %}
+    </div>
+</div>
+
+<div class="card">
+    <h2>📋 各产品差评簇详情</h2>
+    {% for info in compare_data.per_product %}
+    <div class="product-section">
+        <div class="product-header">
+            <h3>{{ info.product }}</h3>
+            <div class="product-stats">
+                总评论: {{ info.total }} | 
+                差评: <strong style="color:#f56c6c">{{ info.negative }}</strong>
+                ({{ (info.negative / info.total * 100) if info.total > 0 else 0 }}%)
+            </div>
+        </div>
+        <div class="cluster-grid">
+            {% for c in info.clusters %}
+            <div class="cluster-card">
+                <div class="cluster-title">
+                    主题 #{{ loop.index }}
+                    <span class="cluster-size">{{ c.size }} 条</span>
+                </div>
+                <div>
+                    {% for kw in c.keywords[:8] %}
+                    <span class="kw-tag kw-unique">{{ kw }}</span>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endfor %}
+</div>
+
+<div class="footer">
+    由 ReviewScan 自动生成 | 多产品差评对比分析
+</div>
+
+</div>
+
+<script>
+const compareData = {{ compare_json | safe }};
+const products = compareData.per_product.map(function(p) { return p.product; });
+const totalReviews = compareData.per_product.map(function(p) { return p.total; });
+const negReviews = compareData.per_product.map(function(p) { return p.negative; });
+
+const barChart = echarts.init(document.getElementById('compareBar'));
+barChart.setOption({
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+    legend: { data: ['总评论数', '差评数'] },
+    grid: { left: '3%', right: '4%', bottom: '3%', containLabel: true },
+    xAxis: { type: 'category', data: products },
+    yAxis: { type: 'value', name: '评论数' },
+    series: [
+        {
+            name: '总评论数', type: 'bar',
+            data: totalReviews,
+            itemStyle: { color: '#409eff', borderRadius: [4, 4, 0, 0] },
+            label: { show: true, position: 'top' }
+        },
+        {
+            name: '差评数', type: 'bar',
+            data: negReviews,
+            itemStyle: { color: '#f56c6c', borderRadius: [4, 4, 0, 0] },
+            label: { show: true, position: 'top' }
+        }
+    ]
+});
+
+window.addEventListener('resize', function() { barChart.resize(); });
+</script>
+</body>
+</html>
