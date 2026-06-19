@@ -397,19 +397,30 @@ class ReviewAnalyzer:
 
         texts = work_df["text"].tolist()
         sentiments = self.sentiment.batch_analyze(texts)
-        work_df["sentiment_label"] = [s.label for s in sentiments]
-        work_df["sentiment_confidence"] = [s.confidence for s in sentiments]
-        work_df["needs_review"] = [s.needs_review for s in sentiments]
+
+        final_labels = []
+        confidences = []
+        for s in sentiments:
+            confidences.append(s.confidence)
+            if s.needs_review:
+                final_labels.append("待人工确认")
+            else:
+                final_labels.append(s.label)
+
+        work_df["sentiment_label"] = final_labels
+        work_df["sentiment_confidence"] = confidences
+        work_df["needs_review"] = work_df["sentiment_label"] == "待人工确认"
 
         total = len(work_df)
         pos_count = int((work_df["sentiment_label"] == "正面").sum())
         neg_count = int((work_df["sentiment_label"] == "负面").sum())
-        review_count = int(work_df["needs_review"].sum())
+        neu_count = int((work_df["sentiment_label"] == "中性").sum())
+        review_count = int((work_df["sentiment_label"] == "待人工确认").sum())
 
         sentiment_dist = {
             "正面": pos_count,
             "负面": neg_count,
-            "中性": total - pos_count - neg_count,
+            "中性": neu_count,
             "待人工确认": review_count,
         }
 
@@ -440,6 +451,101 @@ class ReviewAnalyzer:
             positive_keywords=pos_keywords,
             raw_df=work_df,
         )
+
+    def _build_result_from_labeled_df(
+        self,
+        labeled_df: pd.DataFrame,
+        col_map: dict,
+        product_name: str,
+    ) -> AnalysisResult:
+        """基于已经带有 sentiment_label 列的 DataFrame 重新构建分析结果（不跑大模型）"""
+        work_df = labeled_df.copy()
+        if "text" not in work_df.columns:
+            work_df["text"] = work_df[col_map["text"]].astype(str).fillna("")
+
+        total = len(work_df)
+        pos_count = int((work_df["sentiment_label"] == "正面").sum())
+        neg_count = int((work_df["sentiment_label"] == "负面").sum())
+        neu_count = int((work_df["sentiment_label"] == "中性").sum())
+        review_count = int((work_df["sentiment_label"] == "待人工确认").sum())
+
+        sentiment_dist = {
+            "正面": pos_count,
+            "负面": neg_count,
+            "中性": neu_count,
+            "待人工确认": review_count,
+        }
+
+        neg_mask = work_df["sentiment_label"] == "负面"
+        negative_reviews = []
+        for idx, row in work_df[neg_mask].iterrows():
+            review_dict = {"text": row.get("text", ""), "index": int(idx)}
+            if "rating" in col_map:
+                review_dict["rating"] = row.get(col_map["rating"])
+            if "date" in col_map:
+                review_dict["date"] = str(row.get(col_map["date"]))
+            negative_reviews.append(review_dict)
+
+        clusters = self.clusterer.cluster(negative_reviews)
+        time_trend, anomalies = self.time_analyzer.analyze(work_df, clusters)
+        pos_keywords = extract_positive_keywords(work_df)
+
+        return AnalysisResult(
+            product_name=product_name,
+            total_reviews=total,
+            positive_count=pos_count,
+            negative_count=neg_count,
+            review_needed_count=review_count,
+            sentiment_distribution=sentiment_dist,
+            clusters=clusters,
+            time_trend=time_trend,
+            anomaly_points=anomalies,
+            positive_keywords=pos_keywords,
+            raw_df=work_df,
+        )
+
+    def analyze_incremental(
+        self,
+        previous_labeled_df: pd.DataFrame | None,
+        new_df: pd.DataFrame,
+        product_name: str = "未命名商品",
+    ) -> AnalysisResult:
+        """
+        增量分析：只对 new_df 中的新增评论跑模型，合并 previous_labeled_df 后输出完整报告。
+        若 previous_labeled_df 为 None，则等价于 analyze 全量分析。
+        """
+        col_map = self._detect_columns(new_df)
+        if "text" not in col_map:
+            raise ValueError("无法识别评论文本列，请确保CSV包含评论文本字段")
+
+        work_new = new_df.copy()
+        work_new["text"] = work_new[col_map["text"]].astype(str).fillna("")
+
+        texts = work_new["text"].tolist()
+        sentiments = self.sentiment.batch_analyze(texts)
+
+        final_labels = []
+        confidences = []
+        for s in sentiments:
+            confidences.append(s.confidence)
+            if s.needs_review:
+                final_labels.append("待人工确认")
+            else:
+                final_labels.append(s.label)
+
+        work_new["sentiment_label"] = final_labels
+        work_new["sentiment_confidence"] = confidences
+        work_new["needs_review"] = work_new["sentiment_label"] == "待人工确认"
+
+        if previous_labeled_df is not None and len(previous_labeled_df) > 0:
+            merged = pd.concat(
+                [previous_labeled_df.reset_index(drop=True), work_new.reset_index(drop=True)],
+                ignore_index=True,
+            )
+        else:
+            merged = work_new.reset_index(drop=True)
+
+        return self._build_result_from_labeled_df(merged, col_map, product_name)
 
 
 def compare_products(results: list[AnalysisResult]) -> dict:

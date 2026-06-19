@@ -266,8 +266,9 @@ clusterChart.setOption({
 });
 
 const timeData = {{ time_trend_json | safe }};
+const anomalies = {{ anomalies_json | safe }};
 const anomalyMap = {};
-{{ anomalies_json | safe }}.forEach(function(a) { anomalyMap[a.date] = a.linked_clusters; });
+anomalies.forEach(function(a) { anomalyMap[a.date] = a.linked_clusters; });
 const timeChart = echarts.init(document.getElementById('timeTrend'));
 const dates = timeData.map(function(t) { return t.date; });
 const posData = timeData.map(function(t) { return t.positive_count; });

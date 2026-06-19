@@ -203,6 +203,7 @@ def watch(csv_file: str, interval: int, output: str | None, model: str, max_runs
     last_row_count = 0
     last_mtime = 0.0
     run_count = 0
+    accumulated_labeled_df: pd.DataFrame | None = None
 
     product = _detect_product_name(csv_file)
     console.print(f"[bold cyan]👀 监控模式启动[/bold cyan]  产品: {product}  间隔: {interval}秒")
@@ -221,9 +222,10 @@ def watch(csv_file: str, interval: int, output: str | None, model: str, max_runs
                 current_rows = len(df)
 
                 if current_mtime > last_mtime and current_rows > last_row_count:
+                    added_count = current_rows - last_row_count
                     console.print(
                         f"\n[bold green]🔄 检测到更新:[/bold green] "
-                        f"{current_rows - last_row_count} 条新评论 (共{current_rows}条)"
+                        f"+{added_count} 条新评论 (共{current_rows}条)"
                     )
 
                     if last_row_count == 0:
@@ -231,7 +233,12 @@ def watch(csv_file: str, interval: int, output: str | None, model: str, max_runs
                     else:
                         new_df = df.iloc[last_row_count:].copy()
 
-                    result = analyzer.analyze(new_df, product_name=f"{product} (增量)")
+                    result = analyzer.analyze_incremental(
+                        previous_labeled_df=accumulated_labeled_df,
+                        new_df=new_df,
+                        product_name=product,
+                    )
+                    accumulated_labeled_df = result.raw_df
                     print_to_console(result)
 
                     if output:
@@ -241,7 +248,7 @@ def watch(csv_file: str, interval: int, output: str | None, model: str, max_runs
                             else:
                                 reporter = HtmlReporter()
                                 reporter.render(result, output)
-                            console.print(f"[green]💾 增量报告已更新:[/green] {os.path.abspath(output)}")
+                            console.print(f"[green]💾 完整报告已更新 (共{result.total_reviews}条):[/green] {os.path.abspath(output)}")
                         except Exception as e:
                             console.print(f"[yellow]⚠️  写入报告失败: {e}[/yellow]")
 

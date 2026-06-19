@@ -13,29 +13,49 @@ from rich.text import Text
 from .analyzer import AnalysisResult
 
 
+def _to_python(obj):
+    """递归把 numpy / pandas 类型转成 Python 原生类型，便于 JSON 序列化"""
+    import numpy as np
+
+    if isinstance(obj, dict):
+        return {k: _to_python(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_to_python(v) for v in obj]
+    if isinstance(obj, (np.integer,)):
+        return int(obj)
+    if isinstance(obj, (np.floating,)):
+        return float(obj)
+    if isinstance(obj, (np.bool_,)):
+        return bool(obj)
+    if isinstance(obj, np.ndarray):
+        return [_to_python(v) for v in obj.tolist()]
+    return obj
+
+
 def result_to_dict(result: AnalysisResult) -> dict:
-    return {
+    data = {
         "product_name": result.product_name,
-        "total_reviews": result.total_reviews,
-        "positive_count": result.positive_count,
-        "negative_count": result.negative_count,
-        "review_needed_count": result.review_needed_count,
-        "sentiment_distribution": result.sentiment_distribution,
+        "total_reviews": int(result.total_reviews),
+        "positive_count": int(result.positive_count),
+        "negative_count": int(result.negative_count),
+        "review_needed_count": int(result.review_needed_count),
+        "sentiment_distribution": {k: int(v) for k, v in result.sentiment_distribution.items()},
         "clusters": [
             {
-                "cluster_id": c.cluster_id,
-                "size": c.size,
-                "keywords": c.keywords,
-                "representative_reviews": c.representative_reviews,
+                "cluster_id": int(c.cluster_id),
+                "size": int(c.size),
+                "keywords": list(c.keywords),
+                "representative_reviews": [_to_python(r) for r in c.representative_reviews],
             }
             for c in result.clusters
         ],
-        "time_trend": [asdict(t) for t in result.time_trend],
-        "anomaly_points": [asdict(t) for t in result.anomaly_points],
+        "time_trend": [_to_python(asdict(t)) for t in result.time_trend],
+        "anomaly_points": [_to_python(asdict(t)) for t in result.anomaly_points],
         "positive_keywords": [
-            {"word": w, "count": cnt} for w, cnt in result.positive_keywords
+            {"word": w, "count": int(cnt)} for w, cnt in result.positive_keywords
         ],
     }
+    return _to_python(data)
 
 
 def export_json(result: AnalysisResult, output_path: str) -> None:
@@ -46,7 +66,7 @@ def export_json(result: AnalysisResult, output_path: str) -> None:
 
 def export_compare_json(compare_data: dict, output_path: str) -> None:
     with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(compare_data, f, ensure_ascii=False, indent=2)
+        json.dump(_to_python(compare_data), f, ensure_ascii=False, indent=2)
 
 
 class RichReporter:
