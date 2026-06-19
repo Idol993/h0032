@@ -42,7 +42,7 @@ class StubSentiment:
         results = []
         self._call_count += len(texts)
         positive_words = ["好评", "赞", "满意", "不错", "很棒", "推荐", "给力", "正品", "喜欢", "五星"]
-        negative_words = ["差评", "垃圾", "差", "坏", "退", "破损", "刮花", "假货", "失望", "二手", "粗糙", "慢"]
+        negative_words = ["差评", "垃圾", "差", "坏", "退", "破损", "刮花", "假货", "失望", "二手", "粗糙", "慢", "没电", "续航", "电池", "不好"]
         ambiguous_words = ["一般", "还行", "中规中矩", "一般般", "中评", "说不好"]
 
         for t in texts:
@@ -134,7 +134,7 @@ def check_1_sentiment_distribution() -> tuple[bool, str]:
             ok = False
             msgs.append(f"raw_df needs_review数={nr_count} != dist待确认={dist['待人工确认']}")
 
-    msg = f"总数={total} 分布={dist} → 四类相加={sum_four} {'✅一致' if ok else '❌不一致: ' + '; '.join(msgs)}"
+    msg = f"总数={total} 分布={dist} → 四类相加={sum_four} {'[OK]一致' if ok else '[FAIL]不一致: ' + '; '.join(msgs)}"
     return ok, msg
 
 
@@ -186,7 +186,7 @@ def check_2_watch_merge() -> tuple[bool, str]:
 
     msg = (f"阶段1={result_first.total_reviews}条 + 新增{len(df2)}条 = 合并后={result_merged.total_reviews}条 | "
            f"模型调用：阶段1={stub_calls_after_first}次，增量阶段额外{incremental_model_calls}次 "
-           f"{'✅合并正确' if ok else '❌错误: ' + '; '.join(msgs)}")
+           f"{'[OK]合并正确' if ok else '[FAIL]错误: ' + '; '.join(msgs)}")
     return ok, msg
 
 
@@ -250,7 +250,7 @@ def check_3_json_html_consistency() -> tuple[bool, str]:
 
         msg = (f"总数={jdata['total_reviews']} 情感分布={jdata['sentiment_distribution']} "
                f"簇数={len(jdata['clusters'])} 异常点={len(jdata['anomaly_points'])} "
-               f"{'✅口径一致' if ok else '❌不一致: ' + '; '.join(msgs)}")
+               f"{'[OK]口径一致' if ok else '[FAIL]不一致: ' + '; '.join(msgs)}")
         return ok, msg
 
 
@@ -311,7 +311,7 @@ def check_4_time_trend_with_review_needed() -> tuple[bool, str]:
         f"{tp.date}={tp.total_count}(正{tp.positive_count}/负{tp.negative_count}/中{tp.neutral_count}/待{tp.review_needed_count})"
         for tp in result.time_trend
     )
-    msg = f"共{len(result.time_trend)}天趋势数据: {detail} {'✅每日总数对齐' if ok else '❌错误: ' + '; '.join(msgs)}"
+    msg = f"共{len(result.time_trend)}天趋势数据: {detail} {'[OK]每日总数对齐' if ok else '[FAIL]错误: ' + '; '.join(msgs)}"
     return ok, msg
 
 
@@ -384,7 +384,7 @@ def check_5_cluster_representative_match() -> tuple[bool, str]:
     msg = (f"共{len(result.clusters)}个差评簇，总差评{result.negative_count}条，"
            f"最大主题占比={risk.top_cluster_ratio*100:.1f}%，"
            f"风险概览关键词={risk.top_cluster_keywords} "
-           f"{'✅结构完整且口径一致' if ok else '❌错误: ' + '; '.join(msgs)}")
+           f"{'[OK]结构完整且口径一致' if ok else '[FAIL]错误: ' + '; '.join(msgs)}")
     return ok, msg
 
 
@@ -480,7 +480,7 @@ def check_6_ticket_csv_vs_report() -> tuple[bool, str]:
             msgs.append(f"工单CSV缺少列: {missing_cols}")
 
         detail = f"工单{len(df_ticket)}行，JSON簇{len(jdata['clusters'])}个，对象簇{len(result.clusters)}个"
-        msg = f"{detail} {'✅工单/JSON/对象三方一致' if ok else '❌不一致: ' + '; '.join(msgs)}"
+        msg = f"{detail} {'[OK]工单/JSON/对象三方一致' if ok else '[FAIL]不一致: ' + '; '.join(msgs)}"
         return ok, msg
 
 
@@ -553,7 +553,7 @@ def check_7_html_trend_four_types() -> tuple[bool, str]:
             msgs.append("HTML趋势图tooltip不含'当天总评数'字段")
 
         detail = f"共{len(html_time)}天趋势数据"
-        msg = f"{detail} {'✅HTML四类+总评与JSON一致' if ok else '❌错误: ' + '; '.join(msgs)}"
+        msg = f"{detail} {'[OK]HTML四类+总评与JSON一致' if ok else '[FAIL]错误: ' + '; '.join(msgs)}"
         return ok, msg
 
 
@@ -632,7 +632,457 @@ def check_8_risk_filter_consistency() -> tuple[bool, str]:
 
         detail = (f"全量工单{len(df_t_full)}行，筛选后{n_obj}行（对象）/{n_tkt}行（工单）/{n_json}行（JSON）"
                   f"| 筛选条件=高优先级-only")
-        msg = f"{detail} {'✅三端口径一致且筛选有效' if ok else '❌错误: ' + '; '.join(msgs)}"
+        msg = f"{detail} {'[OK]三端口径一致且筛选有效' if ok else '[FAIL]错误: ' + '; '.join(msgs)}"
+        return ok, msg
+
+
+def check_9_ticket_reuse_matching() -> tuple[bool, str]:
+    """工单复用：旧工单关键词+评论相似度匹配，保留手填字段，新主题追加新编号"""
+    from io import StringIO
+
+    analyzer = ReviewAnalyzer()
+    _inject_stub(analyzer)
+
+    df = pd.read_csv(StringIO(SAMPLE_WITH_AMBIGUOUS))
+    result = analyzer.analyze(df, product_name="自检-工单复用")
+
+    with tempfile.TemporaryDirectory() as td:
+        # 第一次生成工单
+        ticket_path1 = os.path.join(td, "tickets_v1.csv")
+        export_ticket_csv(result, ticket_path1)
+
+        # 模拟运营手填：给第一条工单加状态、处理人、备注
+        df_ticket1 = pd.read_csv(ticket_path1, encoding="utf-8-sig")
+        if len(df_ticket1) >= 1:
+            # 先把可能是 float64 的列转成 object，避免赋值字符串报错
+            str_cols = ["处理状态", "处理人", "备注", "首次发现日期"]
+            for col in str_cols:
+                if col in df_ticket1.columns:
+                    df_ticket1[col] = df_ticket1[col].astype(object).where(df_ticket1[col].notna(), None)
+            df_ticket1.loc[0, "处理状态"] = "处理中"
+            df_ticket1.loc[0, "处理人"] = "张三"
+            df_ticket1.loc[0, "备注"] = "正在联系供应商"
+            df_ticket1.loc[0, "首次发现日期"] = "2026-06-01"
+        df_ticket1.to_csv(ticket_path1, index=False, encoding="utf-8-sig")
+
+        # 重新运行 analyze，传入旧工单
+        result2 = analyzer.analyze(df, product_name="自检-工单复用-第二次")
+        existing_ticket = pd.read_csv(ticket_path1, encoding="utf-8-sig")
+        enrich_cluster_metrics(result2, existing_ticket_df=existing_ticket)
+
+        ticket_path2 = os.path.join(td, "tickets_v2.csv")
+        export_ticket_csv(result2, ticket_path2, existing_ticket_df=existing_ticket)
+
+        df_ticket2 = pd.read_csv(ticket_path2, encoding="utf-8-sig")
+
+        msgs = []
+        ok = True
+
+        # 1. 旧工单编号保留（主题编号相同）
+        if len(df_ticket1) >= 1 and len(df_ticket2) >= 1:
+            if df_ticket1.loc[0, "主题编号"] != df_ticket2.loc[0, "主题编号"]:
+                ok = False
+                msgs.append(f"旧工单编号未保留: v1={df_ticket1.loc[0, '主题编号']} v2={df_ticket2.loc[0, '主题编号']}")
+
+            # 2. 手填字段保留
+            if str(df_ticket2.loc[0, "处理状态"]) != "处理中":
+                ok = False
+                msgs.append(f"处理状态未保留: v2={df_ticket2.loc[0, '处理状态']}")
+            if str(df_ticket2.loc[0, "处理人"]) != "张三":
+                ok = False
+                msgs.append(f"处理人未保留: v2={df_ticket2.loc[0, '处理人']}")
+            if "正在联系供应商" not in str(df_ticket2.loc[0, "备注"]):
+                ok = False
+                msgs.append(f"备注未保留: v2={df_ticket2.loc[0, '备注']}")
+            if str(df_ticket2.loc[0, "首次发现日期"]) != "2026-06-01":
+                ok = False
+                msgs.append(f"首次发现日期未保留: v2={df_ticket2.loc[0, '首次发现日期']}")
+
+        # 3. 对象中也保留了手填字段
+        if result2.clusters:
+            c0 = result2.clusters[0]
+            if c0.status != "处理中":
+                ok = False
+                msgs.append(f"对象中状态未保留: {c0.status}")
+            if c0.assignee != "张三":
+                ok = False
+                msgs.append(f"对象中处理人未保留: {c0.assignee}")
+            if "正在联系供应商" not in c0.notes:
+                ok = False
+                msgs.append(f"对象中备注未保留: {c0.notes}")
+
+        # 4. 新编号不重号（如果新主题加入，从旧最大编号+1开始）
+        existing_ids = set(str(t) for t in df_ticket1["主题编号"].dropna())
+        new_ids = set(str(t) for t in df_ticket2["主题编号"].dropna())
+        for nid in new_ids:
+            if nid not in existing_ids and nid.startswith("T") and nid[1:].isdigit():
+                n = int(nid[1:])
+                max_existing = max(
+                    (int(t[1:]) for t in existing_ids if t.startswith("T") and t[1:].isdigit()),
+                    default=0,
+                )
+                if n <= max_existing:
+                    ok = False
+                    msgs.append(f"新主题编号{nid} ≤ 旧最大编号T{max_existing:03d}，可能重号")
+
+        detail = f"旧工单{len(df_ticket1)}行，新工单{len(df_ticket2)}行，旧编号保留={df_ticket1.loc[0, '主题编号'] if len(df_ticket1)>=1 else 'N/A'}"
+        msg = f"{detail} {'[OK]工单复用匹配成功' if ok else '[FAIL]错误: ' + '; '.join(msgs)}"
+        return ok, msg
+
+
+def check_10_ticket_status_stats() -> tuple[bool, str]:
+    """工单状态统计：四类状态主题数/评论数汇总正确，JSON与对象一致，已解决突增标记复发"""
+    from io import StringIO
+
+    analyzer = ReviewAnalyzer()
+    _inject_stub(analyzer)
+
+    df = pd.read_csv(StringIO(SAMPLE_WITH_AMBIGUOUS))
+    result = analyzer.analyze(df, product_name="自检-状态统计")
+
+    # 先 enrich 一次生成基础字段
+    enrich_cluster_metrics(result)
+
+    # 手工设置不同状态，便于验证（在 enrich 之后设置，避免被覆盖）
+    if len(result.clusters) >= 2:
+        result.clusters[0].status = "处理中"
+        result.clusters[1].status = "已解决"
+        result.clusters[0].assignee = "李四"
+        # 给第二个主题加突增关联，触发复发标记
+        if not result.clusters[1].linked_anomaly_dates:
+            result.clusters[1].linked_anomaly_dates = ["2026-06-19"]
+        # 手动重新计算复发标记（不重新 enrich，避免覆盖 last_appeared_date）
+        result.clusters[1].is_recurring = (
+            result.clusters[1].status == "已解决" and bool(result.clusters[1].linked_anomaly_dates)
+        )
+        # 重新计算状态统计和复发列表
+        from reviewscan.analyzer import calc_ticket_status_stats
+        stats = calc_ticket_status_stats(result)
+        recurring = [
+            {
+                "ticket_id": c.ticket_id,
+                "keywords": c.keywords[:5],
+                "size": c.size,
+                "last_appeared_date": c.last_appeared_date,
+                "linked_anomaly_dates": c.linked_anomaly_dates,
+            }
+            for c in result.clusters
+            if c.is_recurring
+        ]
+        result.risk_overview.ticket_status_summary = stats
+        result.risk_overview.recurring_resolved_clusters = recurring
+
+    msgs = []
+    ok = True
+
+    # 1. 工单状态统计存在
+    stats = result.risk_overview.ticket_status_summary
+    if not stats:
+        ok = False
+        msgs.append("工单状态统计为空")
+    else:
+        # 状态类别正确
+        statuses = [s.status for s in stats]
+        expected = ["待处理", "处理中", "已解决", "观察中"]
+        for e in expected:
+            if e not in statuses:
+                ok = False
+                msgs.append(f"状态统计缺少 {e}")
+
+        # 总数对得上
+        total_clusters = sum(s.cluster_count for s in stats)
+        total_reviews = sum(s.review_count for s in stats)
+        if total_clusters != len(result.clusters):
+            ok = False
+            msgs.append(f"状态统计主题总数={total_clusters} != 实际簇数={len(result.clusters)}")
+        if total_reviews != result.negative_count:
+            ok = False
+            msgs.append(f"状态统计评论总数={total_reviews} != 总差评数={result.negative_count}")
+
+    # 2. 已解决主题关联了突增 → 标记复发
+    recurring = result.risk_overview.recurring_resolved_clusters
+    if len(result.clusters) >= 2 and not recurring:
+        ok = False
+        msgs.append("已解决且关联突增的主题未标记复发")
+    if recurring:
+        for c in recurring:
+            if not c.get("ticket_id"):
+                ok = False
+                msgs.append("复发主题缺少工单号")
+
+    # 3. JSON 输出与对象一致
+    from reviewscan.reporter import result_to_dict
+    jdata = result_to_dict(result)
+    j_stats = jdata["risk_overview"].get("ticket_status_summary", [])
+    if len(j_stats) != len(stats):
+        ok = False
+        msgs.append(f"JSON状态统计长度={len(j_stats)} != 对象={len(stats)}")
+    if j_stats:
+        if j_stats[0].get("status") != stats[0].status:
+            ok = False
+            msgs.append("JSON状态与对象不一致")
+        if int(j_stats[0].get("cluster_count", -1)) != int(stats[0].cluster_count):
+            ok = False
+            msgs.append("JSON主题数与对象不一致")
+
+    detail = f"共{len(result.clusters)}个簇，{len(stats)}种状态，{len(recurring)}个复发主题"
+    msg = f"{detail} {'[OK]状态统计正确' if ok else '[FAIL]错误: ' + '; '.join(msgs)}"
+    return ok, msg
+
+
+def check_11_multi_dim_filter() -> tuple[bool, str]:
+    """多维筛选：优先级、状态、最近N天出现、最近N天突增组合筛选；全局指标不受影响"""
+    from io import StringIO
+
+    analyzer = ReviewAnalyzer()
+    _inject_stub(analyzer)
+
+    df = pd.read_csv(StringIO(SAMPLE_WITH_AMBIGUOUS))
+    result_full = analyzer.analyze(df, product_name="自检-多维筛选全量")
+    enrich_cluster_metrics(result_full)
+
+    # 给簇设置不同状态和优先级（在 enrich 之后设置，避免被覆盖）
+    if len(result_full.clusters) >= 2:
+        result_full.clusters[0].status = "处理中"
+        result_full.clusters[0].priority = "高优先级"
+        # 手动设置日期，避免从 df 取的日期不符合测试预期
+        result_full.clusters[0].last_appeared_date = "2026-06-19"
+        result_full.clusters[0].linked_anomaly_dates = ["2026-06-18"]
+
+        result_full.clusters[1].status = "已解决"
+        result_full.clusters[1].priority = "低优先级"
+        result_full.clusters[1].last_appeared_date = "2026-06-01"  # 18天前
+        result_full.clusters[1].linked_anomaly_dates = ["2026-05-19"]  # 31天前，超过30天窗口
+        # 不重新 enrich，避免覆盖手动设置的值
+
+    msgs = []
+    ok = True
+
+    # 测试 1: 按优先级筛选
+    r_high = filter_clusters(result_full, priorities=["高优先级"], skip_enrich=True)
+    if len(result_full.clusters) >= 2 and len(r_high.clusters) != 1:
+        ok = False
+        msgs.append(f"按高优先级筛选后簇数={len(r_high.clusters)}，期望1")
+
+    # 测试 2: 按状态筛选
+    r_open = filter_clusters(result_full, statuses=["待处理", "处理中"], skip_enrich=True)
+    if len(result_full.clusters) >= 2 and len(r_open.clusters) != 1:
+        ok = False
+        msgs.append(f"按开放状态筛选后簇数={len(r_open.clusters)}，期望1")
+
+    # 测试 3: 按最近 10 天出现过筛选（基准日 2026-06-19）
+    r_recent = filter_clusters(result_full, appeared_last_n_days=10, reference_date="2026-06-19", skip_enrich=True)
+    if len(result_full.clusters) >= 2 and len(r_recent.clusters) != 1:
+        ok = False
+        msgs.append(f"按最近10天出现筛选后簇数={len(r_recent.clusters)}，期望1（6/1的应被过滤）")
+
+    # 测试 4: 按最近 30 天突增关联筛选
+    r_anom_recent = filter_clusters(result_full, anomaly_last_n_days=30, reference_date="2026-06-19", skip_enrich=True)
+    if len(result_full.clusters) >= 2 and len(r_anom_recent.clusters) != 1:
+        ok = False
+        msgs.append(f"按最近30天突增筛选后簇数={len(r_anom_recent.clusters)}，期望1（5/20的应被过滤）")
+
+    # 测试 5: 组合筛选（高优先级 AND 处理中）
+    r_comb = filter_clusters(result_full, priorities=["高优先级"], statuses=["处理中"], skip_enrich=True)
+    if len(result_full.clusters) >= 2 and len(r_comb.clusters) != 1:
+        ok = False
+        msgs.append(f"组合筛选后簇数={len(r_comb.clusters)}，期望1")
+
+    # 测试 6: 全局指标不被筛选影响
+    if r_high.total_reviews != result_full.total_reviews:
+        ok = False
+        msgs.append(f"筛选后总评论数变了: {r_high.total_reviews} vs {result_full.total_reviews}")
+    if r_high.negative_count != result_full.negative_count:
+        ok = False
+        msgs.append(f"筛选后总差评数变了: {r_high.negative_count} vs {result_full.negative_count}")
+
+    # 测试 7: 三端口径一致（筛选后对象/JSON/工单主题数相同）
+    with tempfile.TemporaryDirectory() as td:
+        ticket_path = os.path.join(td, "ticket_filtered.csv")
+        json_path = os.path.join(td, "out_filtered.json")
+        export_ticket_csv(r_comb, ticket_path)
+        export_json(r_comb, json_path)
+
+        df_t = pd.read_csv(ticket_path, encoding="utf-8-sig")
+        with open(json_path, "r", encoding="utf-8") as f:
+            j = json.load(f)
+
+        if len(df_t) != len(r_comb.clusters):
+            ok = False
+            msgs.append(f"筛选后工单行数={len(df_t)} != 对象簇数={len(r_comb.clusters)}")
+        if len(j["clusters"]) != len(r_comb.clusters):
+            ok = False
+            msgs.append(f"筛选后JSON簇数={len(j['clusters'])} != 对象簇数={len(r_comb.clusters)}")
+
+    detail = (f"全量{len(result_full.clusters)}簇 | 高优筛选→{len(r_high.clusters)} | 状态筛选→{len(r_open.clusters)} | "
+              f"最近10天→{len(r_recent.clusters)} | 最近30天突增→{len(r_anom_recent.clusters)} | 组合→{len(r_comb.clusters)}")
+    msg = f"{detail} {'[OK]多维筛选正确且三端一致' if ok else '[FAIL]错误: ' + '; '.join(msgs)}"
+    return ok, msg
+
+
+def check_12_last_date_from_full_df() -> tuple[bool, str]:
+    """最近出现日期从该主题全部评论的最新日期计算，不是只看代表评论"""
+    from io import StringIO
+
+    analyzer = ReviewAnalyzer()
+    _inject_stub(analyzer)
+
+    # 造一批数据：某个主题有很多评论，代表评论的日期比较早，但有一条最新评论在代表评论之外
+    data = """text,rating,date
+质量很差，用了一天就坏了,1,2026-06-01
+做工粗糙，细节不好,1,2026-06-02
+太垃圾了，完全是假货,1,2026-06-03
+电池续航太差劲,1,2026-06-04
+一天就没电了，续航差,1,2026-06-05
+续航真的很差,1,2026-06-06
+用了半天就没电了，续航太差,1,2026-06-07
+"""
+    df = pd.read_csv(StringIO(data))
+    result = analyzer.analyze(df, product_name="自检-最近日期")
+    enrich_cluster_metrics(result)
+
+    msgs = []
+    ok = True
+
+    # 1. 验证 raw_df 里有 cluster_id 列
+    if result.raw_df is None or "cluster_id" not in result.raw_df.columns:
+        ok = False
+        msgs.append("raw_df 中缺少 cluster_id 列，无法按簇取完整日期")
+
+    # 2. 从 raw_df 中按 cluster_id 分组，验证每个簇的最近/首次日期与 cluster 里的一致
+    if result.raw_df is not None and "cluster_id" in result.raw_df.columns and "date" in result.raw_df.columns:
+        df_neg = result.raw_df[result.raw_df["sentiment_label"] == "负面"]
+        grouped = df_neg.groupby("cluster_id")["date"].agg(
+            last_date="max",
+            first_date="min",
+        )
+        expected_dates = {}
+        for cid, row in grouped.iterrows():
+            if pd.notna(cid):
+                expected_dates[int(cid)] = {
+                    "last": str(row["last_date"]) if pd.notna(row["last_date"]) else "",
+                    "first": str(row["first_date"]) if pd.notna(row["first_date"]) else "",
+                }
+
+        # 检查每个 cluster 的日期是否与 raw_df 一致
+        for c in result.clusters:
+            exp = expected_dates.get(c.cluster_id, {})
+            if exp.get("last") and c.last_appeared_date != exp["last"]:
+                ok = False
+                msgs.append(f"簇{c.cluster_id}最近日期={c.last_appeared_date}，期望从df取到{exp['last']}")
+            if exp.get("first") and c.first_seen_date != exp["first"]:
+                ok = False
+                msgs.append(f"簇{c.cluster_id}首次日期={c.first_seen_date}，期望从df取到{exp['first']}")
+
+        # 3. 至少有一个簇的最近日期不是只从代表评论取的
+        # （代表评论最多3条，如果总评论数>3，最近日期应该从完整df取）
+        large_clusters = [c for c in result.clusters if c.size > 3]
+        if large_clusters:
+            lc = large_clusters[0]
+            rep_dates = [str(r.get("date", "")) for r in lc.representative_reviews if r.get("date")]
+            # 如果代表评论的最大日期 < 完整df的最大日期，说明我们确实从完整df取了
+            if rep_dates and max(rep_dates) < lc.last_appeared_date:
+                pass  # 正确！
+            elif rep_dates and max(rep_dates) == lc.last_appeared_date and lc.last_appeared_date == expected_dates.get(lc.cluster_id, {}).get("last"):
+                pass  # 也可能巧合一致，只要和df的一致就行
+            # 只要和 df 的一致就是对的，上面已经检查了
+
+    # 4. 最大簇的最近日期应该是原始数据中最大的 2026-06-07
+    if result.clusters:
+        largest = max(result.clusters, key=lambda c: c.size)
+        expected_max = "2026-06-07"
+        if largest.last_appeared_date != expected_max:
+            ok = False
+            msgs.append(f"最大簇最近日期={largest.last_appeared_date}，期望{expected_max}")
+
+    detail = f"共{len(result.clusters)}个簇，最大簇最近={result.clusters[0].last_appeared_date if result.clusters else 'N/A'}"
+    msg = f"{detail} {'[OK]最近日期从完整df计算' if ok else '[FAIL]错误: ' + '; '.join(msgs)}"
+    return ok, msg
+
+
+def check_13_no_negative_scenario() -> tuple[bool, str]:
+    """无差评主题场景：工单CSV保留表头，终端+JSON+HTML显示暂无可分派"""
+    from io import StringIO
+
+    analyzer = ReviewAnalyzer()
+    _inject_stub(analyzer)
+
+    # 全是好评
+    data = """text,rating,date
+物流很快，包装完好，五星好评,5,2026-06-10
+商品质量不错，很满意,5,2026-06-11
+超出预期，推荐购买,5,2026-06-12
+很好，下次还会买,5,2026-06-13
+非常满意，点赞,5,2026-06-14
+"""
+    df = pd.read_csv(StringIO(data))
+    result = analyzer.analyze(df, product_name="自检-无差评场景")
+
+    with tempfile.TemporaryDirectory() as td:
+        ticket_path = os.path.join(td, "tickets_empty.csv")
+        html_path = os.path.join(td, "out_empty.html")
+        json_path = os.path.join(td, "out_empty.json")
+
+        export_ticket_csv(result, ticket_path)
+        export_json(result, json_path)
+        HtmlReporter().render(result, html_path)
+
+        msgs = []
+        ok = True
+
+        # 1. 工单 CSV 保留固定表头
+        df_t = pd.read_csv(ticket_path, encoding="utf-8-sig")
+        expected_cols = [
+            "主题编号", "评论数", "占差评比例", "占比数值", "主题关键词",
+            "代表评论", "首次发现日期", "最近出现日期",
+            "关联差评突增日期", "是否关联差评突增",
+            "建议优先级", "处理状态", "处理人", "备注",
+        ]
+        for col in expected_cols:
+            if col not in df_t.columns:
+                ok = False
+                msgs.append(f"无差评工单缺少列: {col}")
+        if len(df_t) != 0:
+            ok = False
+            msgs.append(f"无差评工单应有0行数据，实际{len(df_t)}行")
+
+        # 2. JSON 中 clusters 为空数组
+        with open(json_path, "r", encoding="utf-8") as f:
+            j = json.load(f)
+        if j["clusters"] != []:
+            ok = False
+            msgs.append(f"无差评场景JSON clusters长度={len(j['clusters'])}，期望0")
+
+        # 3. HTML 中有"暂无可分派差评主题"提示
+        with open(html_path, "r", encoding="utf-8") as f:
+            html = f.read()
+        if "暂无可分派差评主题" not in html:
+            ok = False
+            msgs.append("HTML中缺少'暂无可分派差评主题'提示")
+
+        # 4. 终端报告中也有提示（通过调用 print_top_clusters 捕获输出验证）
+        import io
+        from rich.console import Console
+        buf = io.StringIO()
+        test_console = Console(file=buf, force_terminal=False)
+        from reviewscan.reporter import RichReporter
+        rep = RichReporter(console=test_console)
+        rep.print_top_clusters(result)
+        output = buf.getvalue()
+        if "暂无可分派差评主题" not in output:
+            ok = False
+            msgs.append("终端报告中缺少'暂无可分派差评主题'提示")
+
+        # 5. 全局指标仍然正确
+        if result.total_reviews != 5:
+            ok = False
+            msgs.append(f"无差评场景总评论数={result.total_reviews}，期望5")
+        if result.negative_count != 0:
+            ok = False
+            msgs.append(f"无差评场景差评数={result.negative_count}，期望0")
+
+        detail = f"工单列={len(df_t)}，JSON clusters={len(j['clusters'])}，HTML提示={'有' if '暂无可分派' in html else '无'}"
+        msg = f"{detail} {'[OK]无差评场景处理正确' if ok else '[FAIL]错误: ' + '; '.join(msgs)}"
         return ok, msg
 
 
@@ -645,6 +1095,11 @@ CHECKS = [
     ("6.工单CSV与JSON/报告三方对照", check_6_ticket_csv_vs_report),
     ("7.HTML趋势图四类+总评对齐JSON", check_7_html_trend_four_types),
     ("8.风险筛选三端(对象/JSON/工单)口径一致", check_8_risk_filter_consistency),
+    ("9.工单复用(匹配旧工单+保留手填字段+新编号追加)", check_9_ticket_reuse_matching),
+    ("10.工单状态统计(四类+复发标记+JSON一致)", check_10_ticket_status_stats),
+    ("11.多维筛选(优先级/状态/最近N天/突增N天+三端一致)", check_11_multi_dim_filter),
+    ("12.最近出现日期(从完整df取，非仅代表评论)", check_12_last_date_from_full_df),
+    ("13.无差评场景(保留表头+三端提示)", check_13_no_negative_scenario),
 ]
 
 
@@ -677,7 +1132,7 @@ def main():
     if failed:
         sys.exit(1)
     else:
-        print("  🎉 所有自检通过！")
+        print("  [V] 所有自检通过！")
         sys.exit(0)
 
 

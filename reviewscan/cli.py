@@ -69,10 +69,18 @@ def app():
 @click.option("--model", type=str, default="uer/roberta-base-finetuned-jd-binary", help="HuggingFace情感模型")
 @click.option("--no-console", is_flag=True, help="不打印终端报告")
 @click.option("--ticket-csv", type=click.Path(), help="差评主题工单导出路径 (.csv)")
+@click.option("--existing-ticket", type=click.Path(exists=True, dir_okay=False), help="已有工单CSV路径，用于匹配旧工单编号和保留手填字段")
 @click.option("--high-risk-only", is_flag=True, help="仅导出高优先级差评主题（报告/JSON/工单均生效）")
 @click.option("--anomaly-only", is_flag=True, help="仅导出关联了差评突增的主题")
+@click.option("--priority", type=click.Choice(["高优先级", "中优先级", "低优先级"]), multiple=True, help="按优先级筛选，可重复指定")
+@click.option("--status", type=click.Choice(["待处理", "处理中", "已解决", "观察中"]), multiple=True, help="按处理状态筛选，可重复指定")
+@click.option("--appeared-last-n-days", type=int, help="仅保留最近N天内出现过的主题")
+@click.option("--anomaly-last-n-days", type=int, help="仅保留最近N天内关联差评突增的主题")
 def analyze(csv_file: str, output: str | None, fmt: str | None, product_name: str | None, model: str, no_console: bool,
-            ticket_csv: str | None, high_risk_only: bool, anomaly_only: bool):
+            ticket_csv: str | None, existing_ticket: str | None,
+            high_risk_only: bool, anomaly_only: bool,
+            priority: tuple[str, ...], status: tuple[str, ...],
+            appeared_last_n_days: int | None, anomaly_last_n_days: int | None):
     """分析单个商品的评论数据，输出情感分布、差评聚类、时间趋势报告。
 
     CSV_FILE: 评论数据CSV文件路径，需包含评论文本列（text/content/评论等）
@@ -80,6 +88,15 @@ def analyze(csv_file: str, output: str | None, fmt: str | None, product_name: st
     product = product_name or _detect_product_name(csv_file)
 
     try:
+        # 读取旧工单（如有）
+        existing_ticket_df = None
+        if existing_ticket:
+            try:
+                existing_ticket_df = _read_csv_safe(existing_ticket)
+            except Exception as e:
+                console.print(f"[yellow]⚠️  读取旧工单失败，将忽略: {e}[/yellow]")
+                existing_ticket_df = None
+
         with Progress(
             SpinnerColumn(),
             TextColumn("[progress.description]{task.description}"),
@@ -96,21 +113,41 @@ def analyze(csv_file: str, output: str | None, fmt: str | None, product_name: st
             progress.update(task, advance=15, description="加载情感分析模型并分类...")
 
             result = analyzer.analyze(df, product_name=product)
-            progress.update(task, advance=60, description="情感分类与差评聚类完成")
+            progress.update(task, advance=50, description="情感分类与差评聚类完成")
+
+            # 先做一次 enrich，补全日期、匹配旧工单
+            from .analyzer import enrich_cluster_metrics
+            enrich_cluster_metrics(result, existing_ticket_df=existing_ticket_df)
 
             # 应用风险筛选（三端口径一致）
-            if high_risk_only or anomaly_only:
-                result = filter_clusters(result, high_priority_only=high_risk_only, with_anomaly_only=anomaly_only)
+            priorities_list = list(priority) if priority else None
+            statuses_list = list(status) if status else None
+            has_filter = any([
+                high_risk_only, anomaly_only,
+                priorities_list, statuses_list,
+                appeared_last_n_days is not None,
+                anomaly_last_n_days is not None,
+            ])
+            if has_filter:
+                result = filter_clusters(
+                    result,
+                    high_priority_only=high_risk_only,
+                    with_anomaly_only=anomaly_only,
+                    priorities=priorities_list,
+                    statuses=statuses_list,
+                    appeared_last_n_days=appeared_last_n_days,
+                    anomaly_last_n_days=anomaly_last_n_days,
+                )
 
             out_fmt = fmt or _check_output_format(output)
             ticket_saved = False
             if ticket_csv:
-                progress.update(task, advance=5, description="生成差评主题工单 CSV...")
-                export_ticket_csv(result, ticket_csv)
+                progress.update(task, advance=10, description="生成差评主题工单 CSV...")
+                export_ticket_csv(result, ticket_csv, existing_ticket_df=existing_ticket_df)
                 ticket_saved = True
 
             if output:
-                progress.update(task, advance=5, description=f"生成 {out_fmt or '文件'} 报告...")
+                progress.update(task, advance=10, description=f"生成 {out_fmt or '文件'} 报告...")
                 if out_fmt == "json":
                     export_json(result, output)
                 elif out_fmt == "csv":
@@ -121,7 +158,7 @@ def analyze(csv_file: str, output: str | None, fmt: str | None, product_name: st
                     reporter.render(result, output)
                 progress.update(task, advance=5)
             else:
-                progress.update(task, advance=10)
+                progress.update(task, advance=15)
 
             progress.update(task, completed=100, description="✅ 分析完成")
 
@@ -140,6 +177,8 @@ def analyze(csv_file: str, output: str | None, fmt: str | None, product_name: st
         raise
     except Exception as e:
         console.print(f"[bold red]❌ 分析失败:[/bold red] {e}")
+        import traceback
+        traceback.print_exc()
         sys.exit(1)
 
 

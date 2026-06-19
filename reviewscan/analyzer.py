@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import re
 from collections import Counter
 from dataclasses import dataclass, field
@@ -43,6 +44,12 @@ class ClusterInfo:
     last_appeared_date: str = ""
     linked_anomaly_dates: list[str] = field(default_factory=list)
     priority: str = "低优先级"
+    ticket_id: str = ""
+    first_seen_date: str = ""
+    status: str = "待处理"
+    assignee: str = ""
+    notes: str = ""
+    is_recurring: bool = False
 
 
 @dataclass
@@ -63,12 +70,21 @@ class TimePoint:
 
 
 @dataclass
+class TicketStatusStats:
+    status: str
+    cluster_count: int
+    review_count: int
+
+
+@dataclass
 class RiskOverview:
     negative_rate: float
     review_needed_rate: float
     recent_anomaly_count: int
     top_cluster_ratio: float
     top_cluster_keywords: list[str]
+    ticket_status_summary: list[TicketStatusStats] = field(default_factory=list)
+    recurring_resolved_clusters: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -248,9 +264,14 @@ class NegativeReviewClusterer:
                 reverse=True,
             )
 
+            # 给每条评论回写 cluster_id（按当前 clusters 长度分配，后面会整体重排）
+            temp_id = len(clusters)
+            for r in cluster_reviews:
+                r["cluster_id"] = temp_id
+
             clusters.append(
                 ClusterInfo(
-                    cluster_id=len(clusters),
+                    cluster_id=temp_id,
                     size=len(cluster_reviews),
                     keywords=keywords,
                     representative_reviews=sorted_reviews[:3],
@@ -258,8 +279,15 @@ class NegativeReviewClusterer:
             )
 
         clusters.sort(key=lambda c: c.size, reverse=True)
+        # 建立 old_id -> new_id 映射
+        id_map = {c.cluster_id: i for i, c in enumerate(clusters)}
         for i, c in enumerate(clusters):
             c.cluster_id = i
+        # 同步回写每条评论的新 cluster_id
+        for r in negative_reviews:
+            old_id = r.get("cluster_id")
+            if old_id is not None and old_id in id_map:
+                r["cluster_id"] = id_map[old_id]
 
         return clusters
 
@@ -495,6 +523,15 @@ class ReviewAnalyzer:
             negative_reviews.append(review_dict)
 
         clusters = self.clusterer.cluster(negative_reviews)
+
+        # 把 cluster_id 写回 work_df，便于后续取完整日期
+        work_df["cluster_id"] = pd.NA
+        for rev in negative_reviews:
+            ridx = rev.get("index")
+            cid = rev.get("cluster_id")
+            if ridx is not None and cid is not None and ridx in work_df.index:
+                work_df.loc[ridx, "cluster_id"] = cid
+
         time_trend, anomalies = self.time_analyzer.analyze(work_df, clusters)
         pos_keywords = extract_positive_keywords(work_df)
         risk = self._calc_risk_overview(total, neg_count, review_count, clusters, anomalies)
@@ -550,6 +587,15 @@ class ReviewAnalyzer:
             negative_reviews.append(review_dict)
 
         clusters = self.clusterer.cluster(negative_reviews)
+
+        # 把 cluster_id 写回 work_df
+        work_df["cluster_id"] = pd.NA
+        for rev in negative_reviews:
+            ridx = rev.get("index")
+            cid = rev.get("cluster_id")
+            if ridx is not None and cid is not None and ridx in work_df.index:
+                work_df.loc[ridx, "cluster_id"] = cid
+
         time_trend, anomalies = self.time_analyzer.analyze(work_df, clusters)
         pos_keywords = extract_positive_keywords(work_df)
         risk = self._calc_risk_overview(total, neg_count, review_count, clusters, anomalies)
@@ -614,9 +660,18 @@ class ReviewAnalyzer:
         return self._build_result_from_labeled_df(merged, col_map, product_name)
 
 
-def enrich_cluster_metrics(result: AnalysisResult) -> AnalysisResult:
-    """补全每个差评簇的工单字段：占比、最近出现日期、突增关联日期、建议优先级"""
+def enrich_cluster_metrics(
+    result: AnalysisResult,
+    existing_ticket_df: Optional[pd.DataFrame] = None,
+) -> AnalysisResult:
+    """补全每个差评簇的工单字段：占比、最近出现日期、突增关联日期、建议优先级；匹配旧工单。
+
+    Args:
+        result: 分析结果
+        existing_ticket_df: 旧工单CSV（可选），用于匹配旧工单编号和保留手填字段
+    """
     if not result.clusters or not result.negative_count:
+        # 无差评主题时，也要生成默认空工单字段
         return result
 
     anomalies = result.anomaly_points or []
@@ -627,45 +682,224 @@ def enrich_cluster_metrics(result: AnalysisResult) -> AnalysisResult:
         for cid in a.linked_clusters:
             anomaly_map.setdefault(cid, []).append(a.date)
 
-    # 建一个 dict: cluster_id -> 簇里所有评论的日期 (取原始 df 中该簇的评论)
-    # 这里我们通过代表评论的 date 估算最近日期（如果有完整 df 就更好，但目前代表评论里带了 date）
+    # 从 raw_df 中按 cluster_id 分组取最大日期（最近出现）和最小日期（首次发现）
+    df = result.raw_df
+    cluster_date_map: dict[int, dict[str, str]] = {}
+    if df is not None and "cluster_id" in df.columns and "date" in df.columns:
+        grouped = df[df["sentiment_label"] == "负面"].groupby("cluster_id")["date"].agg(
+            last_date="max",
+            first_date="min",
+        )
+        for cid, row in grouped.iterrows():
+            if pd.notna(cid):
+                cluster_date_map[int(cid)] = {
+                    "last": str(row["last_date"]) if pd.notna(row["last_date"]) else "",
+                    "first": str(row["first_date"]) if pd.notna(row["first_date"]) else "",
+                }
+
+    # 先匹配旧工单（如果提供）
+    matched_ids = set()
+    if existing_ticket_df is not None and len(existing_ticket_df) > 0:
+        for cluster in result.clusters:
+            matched = _match_single_cluster(cluster, existing_ticket_df, matched_ids)
+            if matched is not None:
+                _apply_matched_ticket(cluster, matched)
+                matched_ids.add(matched["ticket_id"])
+
+    # 为未匹配到的新主题分配新编号
+    max_id_num = 0
+    if existing_ticket_df is not None and "主题编号" in existing_ticket_df.columns:
+        for tid in existing_ticket_df["主题编号"].dropna():
+            s = str(tid)
+            if s.startswith("T") and s[1:].isdigit():
+                n = int(s[1:])
+                if n > max_id_num:
+                    max_id_num = n
+
+    for cluster in result.clusters:
+        if not cluster.ticket_id:
+            max_id_num += 1
+            cluster.ticket_id = f"T{max_id_num:03d}"
+
+    # 再补全其他字段
     for cluster in result.clusters:
         # 占比
         cluster.ratio = round(cluster.size / result.negative_count, 4)
 
-        # 最近出现日期：从代表评论的 date 里取最大的
-        dates = []
-        for rev in cluster.representative_reviews:
-            d = rev.get("date", "")
-            if d and str(d) != "nan":
-                dates.append(str(d))
-        if dates:
-            cluster.last_appeared_date = max(dates)
+        # 最近出现日期（从完整df取最新，即使已有也更新，因为数据更全更准确）
+        date_info = cluster_date_map.get(cluster.cluster_id, {})
+        if date_info.get("last"):
+            cluster.last_appeared_date = date_info["last"]
+        elif not cluster.last_appeared_date:
+            dates = [str(r.get("date", "")) for r in cluster.representative_reviews if r.get("date") and str(r.get("date")) != "nan"]
+            if dates:
+                cluster.last_appeared_date = max(dates)
 
-        # 突增关联
-        cluster.linked_anomaly_dates = list(anomaly_map.get(cluster.cluster_id, []))
+        # 首次发现日期（优先保留已有值：旧工单手填的 > 完整df取的 > 代表评论估算）
+        if not cluster.first_seen_date:
+            if date_info.get("first"):
+                cluster.first_seen_date = date_info["first"]
+            else:
+                dates = [str(r.get("date", "")) for r in cluster.representative_reviews if r.get("date") and str(r.get("date")) != "nan"]
+                if dates:
+                    cluster.first_seen_date = min(dates)
 
-        # 优先级打分
-        score = 0.0
-        score += cluster.ratio * 100  # 占比权重高
+        # 突增关联（合并已有值 + 新检测到的，不去重）
+        new_anomalies = list(anomaly_map.get(cluster.cluster_id, []))
         if cluster.linked_anomaly_dates:
-            score += 40  # 关联突增
-        if len(cluster.keywords) >= 3:
-            score += 10  # 主题明确
-
-        if score >= 60:
-            cluster.priority = "高优先级"
-        elif score >= 30:
-            cluster.priority = "中优先级"
+            existing_set = set(cluster.linked_anomaly_dates)
+            for d in new_anomalies:
+                if d not in existing_set:
+                    cluster.linked_anomaly_dates.append(d)
         else:
-            cluster.priority = "低优先级"
+            cluster.linked_anomaly_dates = new_anomalies
+
+        # 已解决主题最近又突增 → 标记复发
+        cluster.is_recurring = (cluster.status == "已解决" and bool(cluster.linked_anomaly_dates))
+
+        # 优先级打分（保留已有值：旧工单手填的 > 自动计算）
+        if not cluster.priority:
+            score = 0.0
+            score += cluster.ratio * 100  # 占比权重高
+            if cluster.linked_anomaly_dates:
+                score += 40  # 关联突增
+            if len(cluster.keywords) >= 3:
+                score += 10  # 主题明确
+            if score >= 60:
+                cluster.priority = "高优先级"
+            elif score >= 30:
+                cluster.priority = "中优先级"
+            else:
+                cluster.priority = "低优先级"
+
+    # 补充 RiskOverview 的工单状态统计和复发主题
+    stats = calc_ticket_status_stats(result)
+    recurring = [
+        {
+            "ticket_id": c.ticket_id,
+            "keywords": c.keywords[:5],
+            "size": c.size,
+            "last_appeared_date": c.last_appeared_date,
+            "linked_anomaly_dates": c.linked_anomaly_dates,
+        }
+        for c in result.clusters
+        if c.is_recurring
+    ]
+    result.risk_overview.ticket_status_summary = stats
+    result.risk_overview.recurring_resolved_clusters = recurring
 
     return result
 
 
-def build_ticket_dataframe(result: AnalysisResult) -> pd.DataFrame:
-    """生成差评主题工单 DataFrame"""
-    enrich_cluster_metrics(result)
+def _jaccard_similarity(a: set, b: set) -> float:
+    """计算两个集合的Jaccard相似度"""
+    if not a or not b:
+        return 0.0
+    inter = a & b
+    union = a | b
+    return len(inter) / len(union) if union else 0.0
+
+
+def _match_single_cluster(
+    cluster: ClusterInfo,
+    existing_df: pd.DataFrame,
+    used_ticket_ids: set[str],
+    threshold: float = 0.3,
+) -> Optional[dict]:
+    """从旧工单里找最匹配的一条（关键词Jaccard + 评论文本Jaccard），未被占用的。"""
+    best_score = 0.0
+    best_row = None
+
+    cluster_kw = set(cluster.keywords)
+    cluster_text_tokens = set()
+    for r in cluster.representative_reviews:
+        t = r.get("text", "")
+        cluster_text_tokens.update(tokenize_chinese(t))
+
+    for _, row in existing_df.iterrows():
+        tid = str(row.get("主题编号", ""))
+        if tid in used_ticket_ids:
+            continue
+
+        # 关键词相似度
+        ticket_kw = set()
+        kw_str = str(row.get("主题关键词", ""))
+        if kw_str:
+            ticket_kw = set(w.strip() for w in kw_str.replace("、", ",").split(",") if w.strip())
+        kw_sim = _jaccard_similarity(cluster_kw, ticket_kw)
+
+        # 代表评论相似度
+        ticket_text_tokens = set()
+        rep_str = str(row.get("代表评论", ""))
+        if rep_str:
+            ticket_text_tokens.update(tokenize_chinese(rep_str))
+        text_sim = _jaccard_similarity(cluster_text_tokens, ticket_text_tokens)
+
+        # 综合得分（关键词权重更高）
+        total_score = kw_sim * 0.6 + text_sim * 0.4
+
+        if total_score >= threshold and total_score > best_score:
+            best_score = total_score
+            best_row = row.to_dict()
+
+    if best_row is not None:
+        best_row["_match_score"] = best_score
+        best_row["ticket_id"] = str(best_row.get("主题编号", ""))
+    return best_row
+
+
+def _apply_matched_ticket(cluster: ClusterInfo, matched: dict) -> None:
+    """把旧工单字段合并到簇上，保留手填字段。"""
+    cluster.ticket_id = matched.get("ticket_id", cluster.ticket_id)
+    # 手填字段（覆盖）
+    for src, dst in [
+        ("处理状态", "status"),
+        ("处理人", "assignee"),
+        ("备注", "notes"),
+        ("首次发现日期", "first_seen_date"),
+    ]:
+        val = matched.get(src)
+        if val is not None and str(val) != "nan" and str(val).strip():
+            setattr(cluster, dst, str(val).strip())
+
+    # 系统字段（保留自算的值）
+    if not cluster.priority and matched.get("建议优先级"):
+        cluster.priority = str(matched["建议优先级"])
+
+
+def calc_ticket_status_stats(result: AnalysisResult) -> list[TicketStatusStats]:
+    """按状态统计主题数和评论数"""
+    from collections import defaultdict
+
+    status_map: dict[str, TicketStatusStats] = {}
+    default_order = ["待处理", "处理中", "已解决", "观察中"]
+
+    for status in default_order:
+        status_map[status] = TicketStatusStats(status=status, cluster_count=0, review_count=0)
+
+    for cluster in result.clusters:
+        s = cluster.status or "待处理"
+        if s not in status_map:
+            status_map[s] = TicketStatusStats(status=s, cluster_count=0, review_count=0)
+        status_map[s].cluster_count += 1
+        status_map[s].review_count += cluster.size
+
+    return list(status_map.values())
+
+
+def build_ticket_dataframe(
+    result: AnalysisResult,
+    existing_ticket_df: Optional[pd.DataFrame] = None,
+) -> pd.DataFrame:
+    """生成差评主题工单 DataFrame；无差评主题时也保留固定表头"""
+    enrich_cluster_metrics(result, existing_ticket_df=existing_ticket_df)
+
+    columns = [
+        "主题编号", "评论数", "占差评比例", "占比数值", "主题关键词",
+        "代表评论", "首次发现日期", "最近出现日期",
+        "关联差评突增日期", "是否关联差评突增",
+        "建议优先级", "处理状态", "处理人", "备注",
+    ]
 
     rows = []
     for c in result.clusters:
@@ -674,38 +908,115 @@ def build_ticket_dataframe(result: AnalysisResult) -> pd.DataFrame:
             for r in c.representative_reviews
         )
         rows.append({
-            "主题编号": f"T{c.cluster_id + 1:03d}",
+            "主题编号": c.ticket_id,
             "评论数": c.size,
             "占差评比例": f"{c.ratio * 100:.1f}%",
             "占比数值": c.ratio,
             "主题关键词": "、".join(c.keywords),
             "代表评论": rep_texts,
+            "首次发现日期": c.first_seen_date,
             "最近出现日期": c.last_appeared_date,
             "关联差评突增日期": "、".join(c.linked_anomaly_dates),
             "是否关联差评突增": "是" if c.linked_anomaly_dates else "否",
             "建议优先级": c.priority,
+            "处理状态": c.status,
+            "处理人": c.assignee,
+            "备注": c.notes,
         })
 
-    return pd.DataFrame(rows)
+    df = pd.DataFrame(rows, columns=columns)
+    # 确保列类型合理
+    if len(df) == 0:
+        # 空DataFrame也要有正确的列顺序和类型
+        df = pd.DataFrame(columns=columns)
+    return df
 
 
 def filter_clusters(
     result: AnalysisResult,
     high_priority_only: bool = False,
     with_anomaly_only: bool = False,
+    priorities: Optional[list[str]] = None,
+    statuses: Optional[list[str]] = None,
+    appeared_last_n_days: Optional[int] = None,
+    anomaly_last_n_days: Optional[int] = None,
+    reference_date: Optional[str] = None,
+    skip_enrich: bool = False,
 ) -> AnalysisResult:
-    """按风险筛选簇。筛选不影响总评论数、情感分布等全局指标，只影响 clusters。"""
-    if not high_priority_only and not with_anomaly_only:
+    """按风险筛选簇。筛选不影响总评论数、情感分布等全局指标，只影响 clusters.
+
+    Args:
+        priorities: 例如 ["高优先级", "中优先级"]
+        statuses: 例如 ["待处理", "处理中"]
+        appeared_last_n_days: 只保留最近 N 天内出现过的主题（按最近出现日期）
+        anomaly_last_n_days: 只保留最近 N 天内有关联突增的主题
+        reference_date: 日期计算基准，默认用 time_trend 最后一天或今天
+        skip_enrich: 跳过 enrich_cluster_metrics 调用（字段已手动设置时用）
+    """
+    has_any_filter = any([
+        high_priority_only, with_anomaly_only,
+        priorities, statuses,
+        appeared_last_n_days is not None,
+        anomaly_last_n_days is not None,
+    ])
+    if not has_any_filter:
         return result
 
-    enrich_cluster_metrics(result)
+    if not skip_enrich:
+        enrich_cluster_metrics(result)
+
+    # 确定基准日期
+    ref_dt: Optional[datetime.date] = None
+    if reference_date:
+        try:
+            ref_dt = datetime.datetime.strptime(str(reference_date)[:10], "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    if ref_dt is None and result.time_trend:
+        try:
+            last_date = result.time_trend[-1].date
+            ref_dt = datetime.datetime.strptime(str(last_date)[:10], "%Y-%m-%d").date()
+        except ValueError:
+            pass
+    if ref_dt is None:
+        ref_dt = datetime.date.today()
+
+    def _parse_date(s: str) -> Optional[datetime.date]:
+        try:
+            return datetime.datetime.strptime(str(s)[:10], "%Y-%m-%d").date()
+        except (ValueError, TypeError):
+            return None
+
     filtered = []
     for c in result.clusters:
         keep = True
+
         if high_priority_only and c.priority != "高优先级":
             keep = False
         if with_anomaly_only and not c.linked_anomaly_dates:
             keep = False
+        if priorities and c.priority not in priorities:
+            keep = False
+        if statuses and c.status not in statuses:
+            keep = False
+
+        # 最近 N 天出现过
+        if keep and appeared_last_n_days is not None:
+            last_dt = _parse_date(c.last_appeared_date)
+            if last_dt is None or (ref_dt - last_dt).days > appeared_last_n_days:
+                keep = False
+
+        # 最近 N 天有突增关联
+        if keep and anomaly_last_n_days is not None:
+            has_recent_anomaly = False
+            for d in c.linked_anomaly_dates:
+                adt = _parse_date(d)
+                if adt and (ref_dt - adt).days <= anomaly_last_n_days:
+                    has_recent_anomaly = True
+                    break
+            if not has_recent_anomaly:
+                keep = False
+
         if keep:
             filtered.append(c)
 

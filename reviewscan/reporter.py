@@ -51,6 +51,15 @@ def result_to_dict(result: AnalysisResult) -> dict:
             "recent_anomaly_count": int(risk.recent_anomaly_count),
             "top_cluster_ratio": float(risk.top_cluster_ratio),
             "top_cluster_keywords": list(risk.top_cluster_keywords),
+            "ticket_status_summary": [
+                {
+                    "status": s.status,
+                    "cluster_count": int(s.cluster_count),
+                    "review_count": int(s.review_count),
+                }
+                for s in risk.ticket_status_summary
+            ],
+            "recurring_resolved_clusters": [_to_python(c) for c in risk.recurring_resolved_clusters],
         },
         "clusters": [
             {
@@ -62,6 +71,12 @@ def result_to_dict(result: AnalysisResult) -> dict:
                 "last_appeared_date": c.last_appeared_date,
                 "linked_anomaly_dates": list(c.linked_anomaly_dates),
                 "priority": c.priority,
+                "ticket_id": c.ticket_id,
+                "first_seen_date": c.first_seen_date,
+                "status": c.status,
+                "assignee": c.assignee,
+                "notes": c.notes,
+                "is_recurring": bool(c.is_recurring),
             }
             for c in result.clusters
         ],
@@ -80,11 +95,15 @@ def export_json(result: AnalysisResult, output_path: str) -> None:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def export_ticket_csv(result: AnalysisResult, output_path: str) -> None:
-    """导出差评主题工单 CSV"""
+def export_ticket_csv(
+    result: AnalysisResult,
+    output_path: str,
+    existing_ticket_df: Optional[pd.DataFrame] = None,
+) -> None:
+    """导出差评主题工单 CSV；无差评主题时也保留固定表头"""
     from .analyzer import build_ticket_dataframe
 
-    df_ticket = build_ticket_dataframe(result)
+    df_ticket = build_ticket_dataframe(result, existing_ticket_df=existing_ticket_df)
     df_ticket.to_csv(output_path, index=False, encoding="utf-8-sig")
 
 
@@ -94,8 +113,8 @@ def export_compare_json(compare_data: dict, output_path: str) -> None:
 
 
 class RichReporter:
-    def __init__(self):
-        self.console = Console()
+    def __init__(self, console=None):
+        self.console = console or Console()
 
     def print_summary(self, result: AnalysisResult) -> None:
         dist = result.sentiment_distribution
@@ -190,25 +209,71 @@ class RichReporter:
 
         self.console.print(table)
 
+        # 工单状态视角
+        if risk.ticket_status_summary:
+            status_table = Table(title="📋 工单状态统计", show_header=True, header_style="bold blue")
+            status_table.add_column("状态", style="bold", width=12, justify="center")
+            status_table.add_column("主题数", style="cyan", justify="center")
+            status_table.add_column("涉及评论数", style="cyan", justify="center")
+            status_color = {
+                "待处理": "red",
+                "处理中": "yellow",
+                "已解决": "green",
+                "观察中": "blue",
+            }
+            for s in risk.ticket_status_summary:
+                color = status_color.get(s.status, "white")
+                status_table.add_row(
+                    f"[{color}]{s.status}[/{color}]",
+                    str(s.cluster_count),
+                    str(s.review_count),
+                )
+            self.console.print(status_table)
+
+        # 老问题复发警示
+        if risk.recurring_resolved_clusters:
+            warn_table = Table(
+                title="🚨 已解决主题复发警示",
+                show_header=True,
+                header_style="bold red",
+            )
+            warn_table.add_column("工单号", style="bold", justify="center")
+            warn_table.add_column("主题关键词", style="white")
+            warn_table.add_column("评论数", justify="center")
+            warn_table.add_column("最近出现", justify="center")
+            warn_table.add_column("关联突增日期", justify="center")
+            for c in risk.recurring_resolved_clusters:
+                warn_table.add_row(
+                    c.get("ticket_id", ""),
+                    "、".join(c.get("keywords", [])),
+                    str(c.get("size", 0)),
+                    c.get("last_appeared_date", ""),
+                    "、".join(c.get("linked_anomaly_dates", [])),
+                )
+            self.console.print(warn_table)
+
     def print_top_clusters(self, result: AnalysisResult, top_n: int = 5) -> None:
         from .analyzer import enrich_cluster_metrics
 
         enrich_cluster_metrics(result)
         if not result.clusters:
-            self.console.print("[yellow]暂无差评聚类结果[/yellow]")
+            self.console.print("[bold green]✅ 暂无可分派差评主题[/bold green]")
             return
 
         priority_color = {"高优先级": "red", "中优先级": "yellow", "低优先级": "green"}
+        status_color = {"待处理": "red", "处理中": "yellow", "已解决": "green", "观察中": "blue"}
 
         table = Table(
             title=f"🔥 Top {min(top_n, len(result.clusters))} 差评主题（可分派工单）",
             show_header=True,
             header_style="bold magenta",
         )
-        table.add_column("工单", style="dim", width=6, justify="center")
+        table.add_column("工单", style="bold", width=7, justify="center")
         table.add_column("评论数", style="cyan", width=7, justify="center")
         table.add_column("占比", style="cyan", width=7, justify="center")
-        table.add_column("优先级", width=8, justify="center")
+        table.add_column("优先级", width=9, justify="center")
+        table.add_column("状态", width=9, justify="center")
+        table.add_column("处理人", width=10, justify="center")
         table.add_column("最近出现", style="blue", width=12, justify="center")
         table.add_column("突增", style="red", width=6, justify="center")
         table.add_column("主题关键词", style="white")
@@ -217,13 +282,20 @@ class RichReporter:
             pct = f"{cluster.ratio * 100:.1f}%"
             pr = cluster.priority or "低优先级"
             pr_style = priority_color.get(pr, "white")
+            st = cluster.status or "待处理"
+            st_style = status_color.get(st, "white")
             anomaly_link = "是" if cluster.linked_anomaly_dates else "否"
             last_date = cluster.last_appeared_date or "-"
             keywords_str = "、".join(cluster.keywords[:6])
-            ticket_id = f"T{i + 1:03d}"
+            ticket_id = cluster.ticket_id or f"T{i + 1:03d}"
+            assignee = cluster.assignee or "-"
+            if cluster.is_recurring:
+                ticket_id = f"[bold red]{ticket_id}⚠️[/bold red]"
             table.add_row(
                 ticket_id, str(cluster.size), pct,
                 f"[{pr_style}]{pr}[/{pr_style}]",
+                f"[{st_style}]{st}[/{st_style}]",
+                assignee,
                 last_date, anomaly_link, keywords_str,
             )
 
@@ -234,10 +306,13 @@ class RichReporter:
             theme = "、".join(cluster.keywords[:5])
             pr = cluster.priority or "低优先级"
             pr_style = priority_color.get(pr, "white")
+            tag = ""
+            if cluster.is_recurring:
+                tag = " [bold red]⚠️ 已解决但最近复发[/bold red]"
             self.console.print(
-                f"[bold red]主题 #{i + 1}[/bold red] [dim]({cluster.size}条)[/dim] "
+                f"[bold red]主题 #{i + 1}[/bold red] [dim]({cluster.ticket_id or f'T{i+1:03d}'}, {cluster.size}条)[/dim] "
                 f"[{pr_style}][{pr}][/{pr_style}] "
-                f"[cyan]→ {theme}[/cyan]"
+                f"[cyan]→ {theme}[/cyan]{tag}"
             )
             for j, review in enumerate(cluster.representative_reviews[:2]):
                 text = review.get("text", "")

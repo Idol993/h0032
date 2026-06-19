@@ -194,6 +194,56 @@ body {
     </div>
 </div>
 
+{% if result.risk_overview.ticket_status_summary %}
+<div class="card">
+    <h2>📋 工单状态统计</h2>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px;">
+        {% set status_colors = {
+            '待处理': {'bg': '#fff5f5', 'border': '#f56c6c', 'text': '#f56c6c'},
+            '处理中': {'bg': '#fdf6ec', 'border': '#e6a23c', 'text': '#e6a23c'},
+            '已解决': {'bg': '#f0f9eb', 'border': '#67c23a', 'text': '#67c23a'},
+            '观察中': {'bg': '#ecf5ff', 'border': '#409eff', 'text': '#409eff'},
+        } %}
+        {% for s in result.risk_overview.ticket_status_summary %}
+        {% set color = status_colors.get(s.status, {'bg': '#f5f7fa', 'border': '#909399', 'text': '#909399'}) %}
+        <div style="background: {{ color.bg }}; border-left: 4px solid {{ color.border }}; padding: 16px; border-radius: 8px;">
+            <div style="font-size: 13px; color: #909399; margin-bottom: 6px;">{{ s.status }}</div>
+            <div style="font-size: 24px; font-weight: 700; color: {{ color.text }};">{{ s.cluster_count }} 个主题</div>
+            <div style="font-size: 12px; color: #909399; margin-top: 4px;">共 {{ s.review_count }} 条评论</div>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+
+{% if result.risk_overview.recurring_resolved_clusters %}
+<div class="card" style="border: 2px solid #f56c6c; background: #fff8f8;">
+    <h2 style="color: #f56c6c;">🚨 已解决主题复发警示</h2>
+    <table style="width: 100%; border-collapse: collapse;">
+        <thead>
+            <tr style="background: #fff0f0;">
+                <th style="padding: 10px; border: 1px solid #fde2e2; text-align: left;">工单号</th>
+                <th style="padding: 10px; border: 1px solid #fde2e2; text-align: left;">主题关键词</th>
+                <th style="padding: 10px; border: 1px solid #fde2e2; text-align: center;">评论数</th>
+                <th style="padding: 10px; border: 1px solid #fde2e2; text-align: center;">最近出现</th>
+                <th style="padding: 10px; border: 1px solid #fde2e2; text-align: left;">关联突增日期</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for c in result.risk_overview.recurring_resolved_clusters %}
+            <tr>
+                <td style="padding: 10px; border: 1px solid #fde2e2; font-weight: 600;">{{ c.ticket_id }}</td>
+                <td style="padding: 10px; border: 1px solid #fde2e2;">{{ c.keywords | join('、') }}</td>
+                <td style="padding: 10px; border: 1px solid #fde2e2; text-align: center;">{{ c.size }}</td>
+                <td style="padding: 10px; border: 1px solid #fde2e2; text-align: center;">{{ c.last_appeared_date }}</td>
+                <td style="padding: 10px; border: 1px solid #fde2e2;">{{ c.linked_anomaly_dates | join('、') }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% endif %}
+
 <div class="chart-row">
     <div class="card">
         <h2>🥧 情感分布</h2>
@@ -207,18 +257,45 @@ body {
 
 <div class="card">
     <h2>🔥 差评主题聚类</h2>
+    {% if result.clusters %}
     <div class="chart-container" id="clusterBar"></div>
+    {% else %}
+    <div style="padding: 40px; text-align: center; color: #67c23a; font-size: 16px;">
+        ✅ 暂无可分派差评主题
+    </div>
+    {% endif %}
 </div>
 
 <div class="card">
     <h2>🔥 差评主题详情</h2>
+    {% if result.clusters %}
     <div class="cluster-list">
         {% for cluster in result.clusters %}
-        <div class="cluster-item">
+        <div class="cluster-item" {% if cluster.is_recurring %}style="border: 2px solid #f56c6c; background: #fff8f8;"{% endif %}>
             <div class="cluster-header">
-                <span class="cluster-id">主题 #{{ cluster.cluster_id + 1 }}</span>
+                <span class="cluster-id">
+                    主题 #{{ cluster.cluster_id + 1 }}
+                    {% if cluster.ticket_id %}
+                    <span style="background: #409eff; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-left: 8px;">{{ cluster.ticket_id }}</span>
+                    {% endif %}
+                    {% if cluster.is_recurring %}
+                    <span style="background: #f56c6c; color: #fff; padding: 2px 8px; border-radius: 4px; font-size: 12px; margin-left: 8px;">⚠️ 复发</span>
+                    {% endif %}
+                </span>
                 <span class="cluster-size">共 {{ cluster.size }} 条评论</span>
+                {% if cluster.status %}
+                <span style="background: #f0f2f5; padding: 2px 8px; border-radius: 4px; font-size: 12px; color: #606266;">状态: {{ cluster.status }}</span>
+                {% endif %}
+                {% if cluster.priority %}
+                <span style="background: #f0f2f5; padding: 2px 8px; border-radius: 4px; font-size: 12px; color: #606266;">优先级: {{ cluster.priority }}</span>
+                {% endif %}
             </div>
+            {% if cluster.assignee %}
+            <div style="font-size: 13px; color: #606266; margin-bottom: 8px;">处理人: {{ cluster.assignee }}</div>
+            {% endif %}
+            {% if cluster.notes %}
+            <div style="font-size: 13px; color: #606266; margin-bottom: 8px; background: #f5f7fa; padding: 8px; border-radius: 4px;">备注: {{ cluster.notes }}</div>
+            {% endif %}
             <div class="keywords">
                 {% for kw in cluster.keywords %}
                 <span class="kw-tag">{{ kw }}</span>
@@ -232,6 +309,11 @@ body {
         </div>
         {% endfor %}
     </div>
+    {% else %}
+    <div style="padding: 40px; text-align: center; color: #67c23a; font-size: 16px;">
+        ✅ 暂无可分派差评主题
+    </div>
+    {% endif %}
 </div>
 
 <div class="card">
