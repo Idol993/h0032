@@ -33,13 +33,22 @@ def _to_python(obj):
 
 
 def result_to_dict(result: AnalysisResult) -> dict:
+    risk = result.risk_overview
     data = {
         "product_name": result.product_name,
         "total_reviews": int(result.total_reviews),
         "positive_count": int(result.positive_count),
         "negative_count": int(result.negative_count),
+        "neutral_count": int(result.neutral_count),
         "review_needed_count": int(result.review_needed_count),
         "sentiment_distribution": {k: int(v) for k, v in result.sentiment_distribution.items()},
+        "risk_overview": {
+            "negative_rate": float(risk.negative_rate),
+            "review_needed_rate": float(risk.review_needed_rate),
+            "recent_anomaly_count": int(risk.recent_anomaly_count),
+            "top_cluster_ratio": float(risk.top_cluster_ratio),
+            "top_cluster_keywords": list(risk.top_cluster_keywords),
+        },
         "clusters": [
             {
                 "cluster_id": int(c.cluster_id),
@@ -123,6 +132,49 @@ class RichReporter:
 
         self.console.print(table)
 
+    def print_risk_overview(self, result: AnalysisResult) -> None:
+        risk = result.risk_overview
+        neg_pct = risk.negative_rate * 100
+        rev_pct = risk.review_needed_rate * 100
+        top_pct = risk.top_cluster_ratio * 100
+        top_kw = "、".join(risk.top_cluster_keywords) if risk.top_cluster_keywords else "无"
+
+        def _level(pct: float) -> str:
+            if pct >= 30:
+                return "[bold red]高风险[/bold red]"
+            elif pct >= 15:
+                return "[bold yellow]中风险[/bold yellow]"
+            else:
+                return "[bold green]低风险[/bold green]"
+
+        table = Table(title="⚠️  产品风险概览", show_header=True, header_style="bold magenta")
+        table.add_column("指标", style="bold", width=24)
+        table.add_column("数值", justify="center")
+        table.add_column("说明", style="dim")
+
+        table.add_row(
+            "差评率",
+            f"{neg_pct:.1f}%",
+            _level(neg_pct),
+        )
+        table.add_row(
+            "待人工确认率",
+            f"{rev_pct:.1f}%",
+            f"共 {result.review_needed_count} 条需人工复核",
+        )
+        table.add_row(
+            "近7天差评突增次数",
+            f"{risk.recent_anomaly_count} 次",
+            "环比增长>50%且差评≥2条" if risk.recent_anomaly_count > 0 else "运行平稳",
+        )
+        table.add_row(
+            "最大差评主题占比",
+            f"{top_pct:.1f}%",
+            top_kw,
+        )
+
+        self.console.print(table)
+
     def print_top_clusters(self, result: AnalysisResult, top_n: int = 5) -> None:
         if not result.clusters:
             self.console.print("[yellow]暂无差评聚类结果[/yellow]")
@@ -203,6 +255,7 @@ class RichReporter:
         table.add_column("总评", justify="center")
         table.add_column("正面", style="green", justify="center")
         table.add_column("负面", style="red", justify="center")
+        table.add_column("待确认", style="yellow", justify="center")
         table.add_column("差评占比", justify="center")
         table.add_column("环比", justify="center")
 
@@ -217,6 +270,7 @@ class RichReporter:
                 str(tp.total_count),
                 str(tp.positive_count),
                 str(tp.negative_count),
+                str(tp.review_needed_count),
                 neg_pct,
                 Text(growth, style=style),
             )
@@ -226,6 +280,7 @@ class RichReporter:
     def print_analysis(self, result: AnalysisResult) -> None:
         self.print_summary(result)
         self.print_sentiment_pie(result)
+        self.print_risk_overview(result)
         self.print_top_clusters(result)
         self.print_positive_keywords(result)
         self.print_anomalies(result)

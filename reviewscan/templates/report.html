@@ -152,6 +152,48 @@ body {
     </div>
 </div>
 
+<div class="card">
+    <h2>⚠️ 产品风险概览</h2>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px;">
+        <div style="background: #fff5f5; border-left: 4px solid #f56c6c; padding: 16px; border-radius: 8px;">
+            <div style="font-size: 13px; color: #909399; margin-bottom: 6px;">差评率</div>
+            <div style="font-size: 28px; font-weight: 700; color: #f56c6c;">{{ (result.risk_overview.negative_rate * 100) | round(1) }}%</div>
+            <div style="font-size: 12px; color: #909399; margin-top: 4px;">
+                {% if result.risk_overview.negative_rate >= 0.3 %}
+                🔴 高风险，需重点关注
+                {% elif result.risk_overview.negative_rate >= 0.15 %}
+                🟡 中风险，建议跟进
+                {% else %}
+                🟢 低风险，运营平稳
+                {% endif %}
+            </div>
+        </div>
+        <div style="background: #fdf6ec; border-left: 4px solid #e6a23c; padding: 16px; border-radius: 8px;">
+            <div style="font-size: 13px; color: #909399; margin-bottom: 6px;">待人工确认率</div>
+            <div style="font-size: 28px; font-weight: 700; color: #e6a23c;">{{ (result.risk_overview.review_needed_rate * 100) | round(1) }}%</div>
+            <div style="font-size: 12px; color: #909399; margin-top: 4px;">共 {{ result.review_needed_count }} 条需人工复核</div>
+        </div>
+        <div style="background: #ecf5ff; border-left: 4px solid #409eff; padding: 16px; border-radius: 8px;">
+            <div style="font-size: 13px; color: #909399; margin-bottom: 6px;">近7天差评突增</div>
+            <div style="font-size: 28px; font-weight: 700; color: #409eff;">{{ result.risk_overview.recent_anomaly_count }} 次</div>
+            <div style="font-size: 12px; color: #909399; margin-top: 4px;">
+                {% if result.risk_overview.recent_anomaly_count > 0 %}
+                环比增长&gt;50%触发
+                {% else %}
+                运行平稳，无异常
+                {% endif %}
+            </div>
+        </div>
+        <div style="background: #f0f9eb; border-left: 4px solid #67c23a; padding: 16px; border-radius: 8px;">
+            <div style="font-size: 13px; color: #909399; margin-bottom: 6px;">最大差评主题占比</div>
+            <div style="font-size: 28px; font-weight: 700; color: #67c23a;">{{ (result.risk_overview.top_cluster_ratio * 100) | round(1) }}%</div>
+            <div style="font-size: 12px; color: #606266; margin-top: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">
+                {{ result.risk_overview.top_cluster_keywords | join('、') }}
+            </div>
+        </div>
+    </div>
+</div>
+
 <div class="chart-row">
     <div class="card">
         <h2>🥧 情感分布</h2>

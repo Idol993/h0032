@@ -251,10 +251,146 @@ def check_3_json_html_consistency() -> tuple[bool, str]:
         return ok, msg
 
 
+SAMPLE_WITH_AMBIGUOUS = """text,rating,date
+物流很快，包装完好，五星好评！,5,2026-06-10
+这个吧，说好不好说坏不坏，自己体会,3,2026-06-10
+还可以，跟描述的差不多，中规中矩,3,2026-06-10
+质量很差，用了一天就坏了，差评,1,2026-06-10
+一般般吧,3,2026-06-11
+还行吧,3,2026-06-11
+太垃圾了，完全不值这个价,1,2026-06-11
+非常满意，推荐给朋友了,5,2026-06-11
+这个一般，怎么说呢，就那样吧,3,2026-06-12
+还行还行一般般,3,2026-06-12
+"""
+
+
+def check_4_time_trend_with_review_needed() -> tuple[bool, str]:
+    """时间趋势每日总数 = 当天原始评论数（含待人工确认）"""
+    from io import StringIO
+
+    analyzer = ReviewAnalyzer()
+    _inject_stub(analyzer)
+
+    df = pd.read_csv(StringIO(SAMPLE_WITH_AMBIGUOUS))
+    result = analyzer.analyze(df, product_name="自检-时间趋势待确认")
+
+    # 统计每天原始评论数
+    raw_daily = df.groupby("date").size().to_dict()
+
+    msgs = []
+    ok = True
+
+    if not result.time_trend:
+        return False, "未生成时间趋势为空"
+
+    for tp in result.time_trend:
+        raw_count = raw_daily.get(tp.date, 0)
+        sum_four = tp.positive_count + tp.negative_count + tp.neutral_count + tp.review_needed_count
+
+        # 1. 四类相加 = total_count
+        if sum_four != tp.total_count:
+            ok = False
+            msgs.append(f"{tp.date}: 四类相加={sum_four} != total_count={tp.total_count}")
+
+        # 2. total_count = 原始评论数
+        if tp.total_count != raw_count:
+            ok = False
+            msgs.append(f"{tp.date}: time_trend总数={tp.total_count} != 原始数={raw_count} (正{tp.positive_count}+负{tp.negative_count}+中{tp.neutral_count}+待{tp.review_needed_count})")
+
+    # 3. 确认至少有一天存在待确认评论（验证 Stub 对模糊评论打标）
+    has_review_needed = any(tp.review_needed_count > 0 for tp in result.time_trend)
+    if not has_review_needed:
+        ok = False
+        msgs.append("没有任何一天有待确认评论，测试数据可能有问题")
+
+    detail = ", ".join(
+        f"{tp.date}={tp.total_count}(正{tp.positive_count}/负{tp.negative_count}/中{tp.neutral_count}/待{tp.review_needed_count})"
+        for tp in result.time_trend
+    )
+    msg = f"共{len(result.time_trend)}天趋势数据: {detail} {'✅每日总数对齐' if ok else '❌错误: ' + '; '.join(msgs)}"
+    return ok, msg
+
+
+def check_5_cluster_representative_match() -> tuple[bool, str]:
+    """差评簇主题数量、代表评论与报告一致性验证"""
+    from io import StringIO
+
+    analyzer = ReviewAnalyzer()
+    _inject_stub(analyzer)
+
+    df = pd.read_csv(StringIO(SAMPLE_WITH_AMBIGUOUS))
+    result = analyzer.analyze(df, product_name="自检-差评主题对应")
+
+    msgs = []
+    ok = True
+
+    if not result.clusters:
+        return False, "没有任何差评簇，测试数据不足"
+
+    # 1. 所有差评簇大小之和 = 总差评数
+    total_cluster_size = sum(c.size for c in result.clusters)
+    if total_cluster_size != result.negative_count:
+        ok = False
+        msgs.append(f"差评簇大小之和={total_cluster_size} != 总差评数={result.negative_count}")
+
+    # 2. 每个簇的代表评论数量 <= 簇大小，且有至少1条
+    for cluster in result.clusters:
+        n_rep = len(cluster.representative_reviews)
+        if n_rep == 0:
+            ok = False
+            msgs.append(f"簇{cluster.cluster_id}: 代表评论为空")
+        if n_rep > cluster.size:
+            ok = False
+            msgs.append(f"簇{cluster.cluster_id}: 代表评论{n_rep}条 > 簇大小{cluster.size}")
+        # 代表评论非空
+        for i, rev in enumerate(cluster.representative_reviews):
+            if not rev.get("text"):
+                ok = False
+                msgs.append(f"簇{cluster.cluster_id}: 第{i}条代表评论文本为空")
+
+    # 3. 风险概览的最大主题占比在合理范围
+    risk = result.risk_overview
+    if not (0 <= risk.top_cluster_ratio <= 1.0 + 1e-6):
+        ok = False
+        msgs.append(f"最大主题占比={risk.top_cluster_ratio} 超出0~1范围")
+    if result.clusters and len(risk.top_cluster_keywords) == 0:
+        ok = False
+        msgs.append("有差评簇但风险概览里最大主题关键词为空")
+    if result.clusters and risk.top_cluster_keywords:
+        # 最大主题关键词是最大簇的关键词的子集
+        top_cluster = result.clusters[0]
+        if not set(risk.top_cluster_keywords).issubset(set(top_cluster.keywords)):
+            ok = False
+            msgs.append(f"风险概览最大主题关键词 {risk.top_cluster_keywords} 不是最大簇关键词 {top_cluster.keywords[:5]} 的子集")
+
+    # 4. JSON 输出里的簇信息与 AnalysisResult 中一致
+    import json
+    from reviewscan.reporter import result_to_dict
+    jdata = result_to_dict(result)
+    if len(jdata["clusters"]) != len(result.clusters):
+        ok = False
+        msgs.append(f"JSON中簇数量={len(jdata['clusters'])} != 对象中簇数量={len(result.clusters)}")
+    if len(jdata["clusters"]) > 0 and jdata["clusters"][0]["size"] != result.clusters[0].size:
+        ok = False
+        msgs.append("JSON与对象的最大簇大小不一致")
+    if jdata["risk_overview"]["negative_rate"] != float(risk.negative_rate):
+        ok = False
+        msgs.append(f"JSON与对象的差评率不一致: {jdata['risk_overview']['negative_rate']} vs {risk.negative_rate}")
+
+    msg = (f"共{len(result.clusters)}个差评簇，总差评{result.negative_count}条，"
+           f"最大主题占比={risk.top_cluster_ratio*100:.1f}%，"
+           f"风险概览关键词={risk.top_cluster_keywords} "
+           f"{'✅结构完整且口径一致' if ok else '❌错误: ' + '; '.join(msgs)}")
+    return ok, msg
+
+
 CHECKS = [
     ("1.情感分布统计(四类相加=总数)", check_1_sentiment_distribution),
     ("2.Watch增量合并(历史+新增全量)", check_2_watch_merge),
     ("3.JSON与HTML口径一致性", check_3_json_html_consistency),
+    ("4.时间趋势总数(含待确认)", check_4_time_trend_with_review_needed),
+    ("5.差评主题与代表评论对应", check_5_cluster_representative_match),
 ]
 
 

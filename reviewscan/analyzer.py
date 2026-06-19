@@ -46,12 +46,25 @@ class TimePoint:
     date: str
     positive_count: int
     negative_count: int
+    neutral_count: int
+    review_needed_count: int
     total_count: int
     positive_ratio: float
     negative_ratio: float
+    neutral_ratio: float
+    review_needed_ratio: float
     negative_growth: float
     is_anomaly: bool
     linked_clusters: list[int] = field(default_factory=list)
+
+
+@dataclass
+class RiskOverview:
+    negative_rate: float
+    review_needed_rate: float
+    recent_anomaly_count: int
+    top_cluster_ratio: float
+    top_cluster_keywords: list[str]
 
 
 @dataclass
@@ -60,12 +73,14 @@ class AnalysisResult:
     total_reviews: int
     positive_count: int
     negative_count: int
+    neutral_count: int
     review_needed_count: int
     sentiment_distribution: dict
     clusters: list[ClusterInfo]
     time_trend: list[TimePoint]
     anomaly_points: list[TimePoint]
     positive_keywords: list[tuple[str, int]]
+    risk_overview: RiskOverview
     raw_df: Optional[pd.DataFrame] = None
 
 
@@ -273,14 +288,16 @@ class TimeSeriesAnalyzer:
             .unstack(fill_value=0)
             .reset_index()
         )
-        for col in ["正面", "负面", "中性"]:
+        for col in ["正面", "负面", "中性", "待人工确认"]:
             if col not in daily.columns:
                 daily[col] = 0
 
         daily = daily.sort_values("_date")
-        daily["total"] = daily["正面"] + daily["负面"] + daily["中性"]
+        daily["total"] = daily["正面"] + daily["负面"] + daily["中性"] + daily["待人工确认"]
         daily["positive_ratio"] = daily["正面"] / daily["total"].replace(0, 1)
         daily["negative_ratio"] = daily["负面"] / daily["total"].replace(0, 1)
+        daily["neutral_ratio"] = daily["中性"] / daily["total"].replace(0, 1)
+        daily["review_needed_ratio"] = daily["待人工确认"] / daily["total"].replace(0, 1)
 
         negative_series = daily["负面"].astype(float).values
         growth_rates = [0.0]
@@ -319,9 +336,13 @@ class TimeSeriesAnalyzer:
                 date=date_str,
                 positive_count=int(row["正面"]),
                 negative_count=int(row["负面"]),
+                neutral_count=int(row["中性"]),
+                review_needed_count=int(row["待人工确认"]),
                 total_count=int(row["total"]),
                 positive_ratio=float(row["positive_ratio"]),
                 negative_ratio=float(row["negative_ratio"]),
+                neutral_ratio=float(row["neutral_ratio"]),
+                review_needed_ratio=float(row["review_needed_ratio"]),
                 negative_growth=float(growth_rates[i]),
                 is_anomaly=is_anomaly,
                 linked_clusters=linked,
@@ -383,6 +404,41 @@ class ReviewAnalyzer:
 
         return cols
 
+    @staticmethod
+    def _calc_risk_overview(
+        total: int,
+        neg_count: int,
+        review_count: int,
+        clusters: list[ClusterInfo],
+        anomalies: list[TimePoint],
+        recent_days: int = 7,
+    ) -> RiskOverview:
+        neg_rate = neg_count / total if total > 0 else 0.0
+        rev_rate = review_count / total if total > 0 else 0.0
+
+        recent_anom = 0
+        if anomalies:
+            sorted_anom = sorted(anomalies, key=lambda a: a.date, reverse=True)
+            if len(sorted_anom) <= recent_days:
+                recent_anom = len(sorted_anom)
+            else:
+                recent_anom = recent_days
+
+        top_ratio = 0.0
+        top_keywords: list[str] = []
+        if clusters and neg_count > 0:
+            top_cluster = clusters[0]
+            top_ratio = top_cluster.size / neg_count
+            top_keywords = top_cluster.keywords[:5]
+
+        return RiskOverview(
+            negative_rate=round(neg_rate, 4),
+            review_needed_rate=round(rev_rate, 4),
+            recent_anomaly_count=recent_anom,
+            top_cluster_ratio=round(top_ratio, 4),
+            top_cluster_keywords=top_keywords,
+        )
+
     def analyze(
         self,
         df: pd.DataFrame,
@@ -437,18 +493,21 @@ class ReviewAnalyzer:
         clusters = self.clusterer.cluster(negative_reviews)
         time_trend, anomalies = self.time_analyzer.analyze(work_df, clusters)
         pos_keywords = extract_positive_keywords(work_df)
+        risk = self._calc_risk_overview(total, neg_count, review_count, clusters, anomalies)
 
         return AnalysisResult(
             product_name=product_name,
             total_reviews=total,
             positive_count=pos_count,
             negative_count=neg_count,
+            neutral_count=neu_count,
             review_needed_count=review_count,
             sentiment_distribution=sentiment_dist,
             clusters=clusters,
             time_trend=time_trend,
             anomaly_points=anomalies,
             positive_keywords=pos_keywords,
+            risk_overview=risk,
             raw_df=work_df,
         )
 
@@ -489,18 +548,21 @@ class ReviewAnalyzer:
         clusters = self.clusterer.cluster(negative_reviews)
         time_trend, anomalies = self.time_analyzer.analyze(work_df, clusters)
         pos_keywords = extract_positive_keywords(work_df)
+        risk = self._calc_risk_overview(total, neg_count, review_count, clusters, anomalies)
 
         return AnalysisResult(
             product_name=product_name,
             total_reviews=total,
             positive_count=pos_count,
             negative_count=neg_count,
+            neutral_count=neu_count,
             review_needed_count=review_count,
             sentiment_distribution=sentiment_dist,
             clusters=clusters,
             time_trend=time_trend,
             anomaly_points=anomalies,
             positive_keywords=pos_keywords,
+            risk_overview=risk,
             raw_df=work_df,
         )
 
